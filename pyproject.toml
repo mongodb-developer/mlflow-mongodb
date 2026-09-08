@@ -1,0 +1,134 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+addopts = ["--import-mode=importlib"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+required-version = "0.16.0"
+force-exclude = true
+extend-include = ["*.ipynb"]
+
+[tool.ruff.format]
+preview = true
+docstring-code-format = true
+
+[tool.ruff.lint]
+preview = true
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+select = [
+  "B006",
+  "B012",
+  "B015",
+  "D209",
+  "D411",
+  "DTZ003",
+  "E",
+  "F",
+  "FURB110",
+  "FURB129",
+  "FURB142",
+  "FURB148",
+  "FURB167",
+  "FURB188",
+  "FURB192",
+  "C4",
+  "I",
+  "ISC001",
+  "N804",
+  "PERF401",
+  "PIE790",
+  "PLC0414",
+  "PLR0402",
+  "PLR1714",
+  "PLE1205",
+  "PLW0602",
+  "PLW1508",
+  "PT001",
+  "PT002",
+  "PT003",
+  "PT006",
+  "PT007",
+  "PT009",
+  "PT010",
+  "PT011",
+  "PT012",
+  "PT013",
+  "PT014",
+  "PT017",
+  "PT018",
+  "PT022",
+  "PT023",
+  "PT026",
+  "PT027",
+  "PT030",
+  "PT031",
+  "PYI024",
+  "RET504",
+  "RUF002",
+  "RUF003",
+  "RUF010",
+  "RUF013",
+  "RUF039",
+  "RUF051",
+  "RUF068",
+  "RUF100",
+  "S102",
+  "S307",
+  "S324",
+  "S506",
+  "SIM101",
+  "SIM108",
+  "SIM114",
+  "SIM115",
+  "SIM210",
+  "SIM910",
+  "T20",
+  "TID251",
+  "TID252",
+  "TRY203",
+  "UP004",
+  "UP006",
+  "UP007",
+  "UP008",
+  "UP011",
+  "UP012",
+  "UP015",
+  "UP030",
+  "UP031",
+  "UP034",
+  "UP045",
+  "W",
+]
+ignore = [
+  "E265",
+  "E266",
+  "E402",
+  "E721",
+  "E741",
+  "F811",
+]
+
+[tool.ruff.lint.flake8-pytest-style]
+mark-parentheses = false
+fixture-parentheses = false
+raises-require-match-for = ["*"]
+warns-require-match-for = ["*"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.isort]
+known-first-party = ["mlflow_mongodb"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"pkg_resources".msg = "Do not use pkg_resources. Use importlib.resources or importlib.metadata instead."
+"entrypoints".msg = "Do not use entrypoints. Use importlib.metadata.entry_points instead."
+"pip".msg = "Importing pip can cause undesired side effects."
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"

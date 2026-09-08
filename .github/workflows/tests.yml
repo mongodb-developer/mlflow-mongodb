@@ -1,0 +1,93 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Ruff
+        run: python -m pip install ruff==0.16.0
+
+      - name: Check linting
+        run: ruff check .
+
+      - name: Check formatting
+        run: ruff format --check .
+
+  tests:
+    name: ${{ matrix.name }}
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Minimum — Python 3.10, MLflow 3.1, PyMongo 4.0, MongoDB 8.0
+            python_version: "3.10"
+            mlflow_spec: mlflow==3.1.0
+            pymongo_spec: pymongo==4.0.0
+          - name: Current — Python 3.14, latest MLflow 3.x and PyMongo 4.x, MongoDB 8.0
+            python_version: "3.14"
+            mlflow_spec: mlflow>=3.1,<4
+            pymongo_spec: pymongo>=4.9,<5
+    env:
+      MONGODB_URI: mongodb://localhost:27017/mlflow_ci_test?replicaSet=test-rs
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python ${{ matrix.python_version }}
+        uses: actions/setup-python@v7.0.0
+        with:
+          python-version: ${{ matrix.python_version }}
+          cache: pip
+
+      - name: Start MongoDB 8.0 replica set
+        uses: supercharge/mongodb-github-action@315db7fe45ac2880b7758f1933e6e5d59afd5e94 # 1.12.1
+        with:
+          mongodb-version: "8.0"
+          mongodb-replica-set: test-rs
+
+      - name: Install test stack
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]" "${{ matrix.mlflow_spec }}" "${{ matrix.pymongo_spec }}"
+
+      - name: Show installed versions
+        run: >-
+          python -c "import platform, mlflow, pymongo;
+          print('Python', platform.python_version());
+          print('MLflow', mlflow.__version__);
+          print('PyMongo', pymongo.__version__)"
+
+      - name: Run unit and functional tests
+        run: python -m pytest tests/unit tests/functional
