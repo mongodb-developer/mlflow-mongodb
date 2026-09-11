@@ -68,6 +68,7 @@ from mlflow_mongodb.repositories import (
     RegisteredModelRecord,
     RegisteredModelRepository,
 )
+from mlflow_mongodb.settings import MongoDBSettings
 
 try:
     from mlflow.utils.validation import (
@@ -93,6 +94,7 @@ class MongoDBModelRegistryStore(AbstractStore):
         super().__init__(store_uri=store_uri, tracking_uri=tracking_uri)
         self.store_uri = store_uri
         self.tracking_uri = tracking_uri
+        self._settings = MongoDBSettings.from_environment()
 
     @cached_property
     def _mongo_client(self):
@@ -122,11 +124,11 @@ class MongoDBModelRegistryStore(AbstractStore):
 
     @cached_property
     def _registered_model_repository(self):
-        return RegisteredModelRepository(self._database)
+        return RegisteredModelRepository(self._database, settings=self._settings)
 
     @cached_property
     def _model_version_repository(self):
-        return ModelVersionRepository(self._database)
+        return ModelVersionRepository(self._database, settings=self._settings)
 
     @cached_property
     def _tracking_client(self):
