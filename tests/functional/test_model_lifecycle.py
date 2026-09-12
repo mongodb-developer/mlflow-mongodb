@@ -115,9 +115,9 @@ def test_registered_model_and_version_lifecycle(store: MongoDBModelRegistryStore
         store.get_registered_model(RENAMED_MODEL_NAME)
     assert deleted_model_error.value.error_code == "RESOURCE_DOES_NOT_EXIST"
     assert (
-        store._database[store._settings.model_versions_collection_name].count_documents({
-            "registered_model_id": registered_model.model_id
-        })
+        store._database[store._settings.model_versions_collection_name].count_documents(
+            {"registered_model_id": registered_model.model_id}
+        )
         == 0
     )
 

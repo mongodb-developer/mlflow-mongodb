@@ -143,10 +143,12 @@ def test_parse_registered_model_order_normalizes_timestamp_alias():
     )
 
     with pytest.raises(MlflowException, match="duplicate fields") as exc_info:
-        MongoDBModelRegistryStore._parse_registered_model_order([
-            "timestamp ASC",
-            "last_updated_timestamp DESC",
-        ])
+        MongoDBModelRegistryStore._parse_registered_model_order(
+            [
+                "timestamp ASC",
+                "last_updated_timestamp DESC",
+            ]
+        )
 
     assert exc_info.value.error_code == "INVALID_PARAMETER_VALUE"
 

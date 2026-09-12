@@ -170,10 +170,12 @@ def test_deleted_model_version_is_redacted_and_unavailable(
     assert registered_model is not None
     store.delete_model_version(name, version.version)
 
-    raw_version = store._database[store._settings.model_versions_collection_name].find_one({
-        "registered_model_id": registered_model.model_id,
-        "version": version.version,
-    })
+    raw_version = store._database[store._settings.model_versions_collection_name].find_one(
+        {
+            "registered_model_id": registered_model.model_id,
+            "version": version.version,
+        }
+    )
     assert raw_version is not None
     assert raw_version["current_stage"] == STAGE_DELETED_INTERNAL
     assert raw_version["description"] is None

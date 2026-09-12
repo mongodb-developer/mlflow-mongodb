@@ -481,11 +481,13 @@ class ModelVersionRepository:
             The matching :class:`ModelVersionRecord`, or ``None`` if the
             version does not exist or has been soft-deleted.
         """
-        document = self._collection.find_one({
-            "registered_model_id": registered_model_id,
-            "version": version,
-            "current_stage": {"$ne": STAGE_DELETED_INTERNAL},
-        })
+        document = self._collection.find_one(
+            {
+                "registered_model_id": registered_model_id,
+                "version": version,
+                "current_stage": {"$ne": STAGE_DELETED_INTERNAL},
+            }
+        )
         return ModelVersionRecord.from_document(document) if document is not None else None
 
     def exists_for_registered_model(
@@ -504,33 +506,35 @@ class ModelVersionRepository:
             ``True`` if the registered model exists and owns the specified
             non-deleted version; otherwise, ``False``.
         """
-        documents = self._registered_models_collection.aggregate([
-            {
-                "$match": {"name": registered_model_name},
-            },
-            {"$limit": 1},
-            {
-                "$lookup": {
-                    "from": self._settings.model_versions_collection_name,
-                    "localField": "_id",
-                    "foreignField": "registered_model_id",
-                    "pipeline": [
-                        {
-                            "$match": {
-                                "version": version,
-                                "current_stage": {"$ne": STAGE_DELETED_INTERNAL},
-                            }
-                        },
-                        {"$limit": 1},
-                        {"$project": {"_id": True}},
-                    ],
-                    "as": "matching_versions",
-                }
-            },
-            {"$match": {"matching_versions.0": {"$exists": True}}},
-            {"$project": {"_id": True}},
-            {"$limit": 1},
-        ])
+        documents = self._registered_models_collection.aggregate(
+            [
+                {
+                    "$match": {"name": registered_model_name},
+                },
+                {"$limit": 1},
+                {
+                    "$lookup": {
+                        "from": self._settings.model_versions_collection_name,
+                        "localField": "_id",
+                        "foreignField": "registered_model_id",
+                        "pipeline": [
+                            {
+                                "$match": {
+                                    "version": version,
+                                    "current_stage": {"$ne": STAGE_DELETED_INTERNAL},
+                                }
+                            },
+                            {"$limit": 1},
+                            {"$project": {"_id": True}},
+                        ],
+                        "as": "matching_versions",
+                    }
+                },
+                {"$match": {"matching_versions.0": {"$exists": True}}},
+                {"$project": {"_id": True}},
+                {"$limit": 1},
+            ]
+        )
         return next(documents, None) is not None
 
     def find_latest_by_stages(
@@ -550,18 +554,20 @@ class ModelVersionRepository:
             :class:`ModelVersionRecord` for each requested stage, ordered by
             version number descending.
         """
-        documents = self._collection.aggregate([
-            {
-                "$match": {
-                    "registered_model_id": registered_model_id,
-                    "current_stage": {"$in": list(stages)},
-                }
-            },
-            {"$sort": {"current_stage": ASCENDING, "version": DESCENDING}},
-            {"$group": {"_id": "$current_stage", "record": {"$first": "$$ROOT"}}},
-            {"$replaceRoot": {"newRoot": "$record"}},
-            {"$sort": {"version": DESCENDING}},
-        ])
+        documents = self._collection.aggregate(
+            [
+                {
+                    "$match": {
+                        "registered_model_id": registered_model_id,
+                        "current_stage": {"$in": list(stages)},
+                    }
+                },
+                {"$sort": {"current_stage": ASCENDING, "version": DESCENDING}},
+                {"$group": {"_id": "$current_stage", "record": {"$first": "$$ROOT"}}},
+                {"$replaceRoot": {"newRoot": "$record"}},
+                {"$sort": {"version": DESCENDING}},
+            ]
+        )
         return tuple(ModelVersionRecord.from_document(document) for document in documents)
 
     def search(
@@ -609,16 +615,18 @@ class ModelVersionRepository:
         version_clauses.extend(self._build_filter_clauses(version_filters))
         if exclude_prompts:
             # Prompt exclusion is represented by the registered-model prompt tag.
-            version_clauses.append({
-                "tags": {
-                    "$not": {
-                        "$elemMatch": {
-                            "key": IS_PROMPT_TAG_KEY,
-                            "value": "true",
+            version_clauses.append(
+                {
+                    "tags": {
+                        "$not": {
+                            "$elemMatch": {
+                                "key": IS_PROMPT_TAG_KEY,
+                                "value": "true",
+                            }
                         }
                     }
                 }
-            })
+            )
 
         # Filter versions first, then join the owning registered model for the
         # returned entity and any parent-model filters.
@@ -717,13 +725,15 @@ class ModelVersionRepository:
                 }
                 for search_filter in filters_for_key
             )
-            clauses.append({
-                "tags": {
-                    "$elemMatch": {
-                        "$and": element_clauses,
+            clauses.append(
+                {
+                    "tags": {
+                        "$elemMatch": {
+                            "$and": element_clauses,
+                        }
                     }
                 }
-            })
+            )
         return clauses
 
     @classmethod

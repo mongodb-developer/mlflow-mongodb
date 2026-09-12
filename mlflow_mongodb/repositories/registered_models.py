@@ -552,13 +552,15 @@ class RegisteredModelRepository:
         pipeline: list[dict[str, Any]] = [{"$match": query}]
         if sort:
             pipeline.append({"$sort": sort})
-        pipeline.extend([
-            {"$skip": offset},
-            # Fetch one extra record to determine whether another page exists;
-            # it is not included in the returned records below.
-            {"$limit": max_results + 1},
-            self._latest_versions_lookup_stage(),
-        ])
+        pipeline.extend(
+            [
+                {"$skip": offset},
+                # Fetch one extra record to determine whether another page exists;
+                # it is not included in the returned records below.
+                {"$limit": max_results + 1},
+                self._latest_versions_lookup_stage(),
+            ]
+        )
         documents = list(self._collection.aggregate(pipeline))
         records = tuple(self._to_details(document) for document in documents[:max_results])
         return RegisteredModelPage(records=records, has_more=len(documents) > max_results)

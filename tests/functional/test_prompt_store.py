@@ -114,9 +114,9 @@ def test_deleting_prompt_removes_its_versions(store: MongoDBModelRegistryStore):
 
     assert store.get_prompt(PROMPT_NAME) is None
     assert (
-        store._database[store._settings.model_versions_collection_name].count_documents({
-            "registered_model_id": registered_model.model_id
-        })
+        store._database[store._settings.model_versions_collection_name].count_documents(
+            {"registered_model_id": registered_model.model_id}
+        )
         == 0
     )
 
