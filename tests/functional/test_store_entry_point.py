@@ -1,7 +1,7 @@
 """Local functional checks for MLflow entry-point discovery."""
 
 import pytest
-from mlflow.tracking._model_registry.utils import _get_store
+from mlflow.tracking._model_registry.utils import _get_store  # ruff: ignore[import-private-name]
 
 from mlflow_mongodb import MongoDBModelRegistryStore
 

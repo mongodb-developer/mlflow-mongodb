@@ -190,20 +190,25 @@ class MongoDBModelRegistryStore(AbstractStore):
             model_id=record.model_id,
         )
 
+    def _resolve_models_uri(self, parsed_model_uri, run_id):
+        if parsed_model_uri.model_id is not None:
+            model = self._tracking_client.get_logged_model(parsed_model_uri.model_id)
+            return model.artifact_location, run_id or model.source_run_id
+
+        return (
+            self.get_model_version_download_uri(
+                parsed_model_uri.name,
+                parsed_model_uri.version,
+            ),
+            run_id,
+        )
+
     def _resolve_model_version_source(self, source, run_id, model_id):
         storage_location = source
         if urllib.parse.urlparse(source).scheme == "models":
             parsed_model_uri = _parse_model_uri(source)
             try:
-                if parsed_model_uri.model_id is not None:
-                    model = self._tracking_client.get_logged_model(parsed_model_uri.model_id)
-                    storage_location = model.artifact_location
-                    run_id = run_id or model.source_run_id
-                else:
-                    storage_location = self.get_model_version_download_uri(
-                        parsed_model_uri.name,
-                        parsed_model_uri.version,
-                    )
+                storage_location, run_id = self._resolve_models_uri(parsed_model_uri, run_id)
             except Exception as exc:
                 raise MlflowException(
                     f"Unable to fetch model from model URI source artifact location '{source}'. "

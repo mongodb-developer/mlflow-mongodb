@@ -1,8 +1,9 @@
 """Persistence operations for registered models."""
 
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Literal
 
 from bson import ObjectId
 from mlflow.entities.model_registry.model_version_stages import STAGE_DELETED_INTERNAL

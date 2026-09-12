@@ -4,8 +4,6 @@ import threading
 
 from mlflow import MlflowClient
 
-from mlflow_mongodb import MongoDBModelRegistryStore
-
 PROMPT_NAME = "mongodb-client-functional-prompt"
 PROMPT_TEMPLATE = "Summarize {{document}} in three sentences."
 
@@ -19,7 +17,6 @@ def _wait_for_prompt_linking_threads() -> None:
 
 
 def test_mlflow_client_prompt_lifecycle(
-    store: MongoDBModelRegistryStore,
     mongodb_uri: str,
     tmp_path,
 ):

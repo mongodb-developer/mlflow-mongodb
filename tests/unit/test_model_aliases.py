@@ -53,7 +53,6 @@ def test_get_latest_alias_returns_latest_version_without_stored_alias(
 def test_get_latest_alias_raises_when_model_has_no_versions(
     store,
     registered_model_repository,
-    model_version_repository,
     registered_model_record_factory,
     registered_model_details_factory,
 ):

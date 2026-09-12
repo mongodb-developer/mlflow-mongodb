@@ -1,6 +1,7 @@
 """Shared helpers for MongoDB repositories."""
 
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 
 def build_replace_array_element_pipeline(

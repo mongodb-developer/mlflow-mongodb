@@ -342,7 +342,7 @@ def test_search_rejects_invalid_tokens_and_excessive_page_sizes(
     method = getattr(store, method_name)
 
     with pytest.raises(MlflowException, match="Invalid page token") as token_error:
-        method(page_token="not-a-page-token")
+        method(page_token="not-a-page-token")  # ruff: ignore[hardcoded-password-func-arg]
     assert token_error.value.error_code == "INVALID_PARAMETER_VALUE"
 
     with pytest.raises(

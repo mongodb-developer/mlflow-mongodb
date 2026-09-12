@@ -1,8 +1,8 @@
 """Runtime settings for the MongoDB MLflow plugin."""
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Mapping
 
 
 @dataclass(frozen=True)
