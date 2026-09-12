@@ -69,3 +69,71 @@ def test_latest_alias_cannot_be_stored(store: MongoDBModelRegistryStore):
         store.set_registered_model_alias(MODEL_NAME, "LaTeSt", first_version.version)
 
     assert store.get_registered_model(MODEL_NAME).aliases == {}
+
+
+def test_stored_alias_lifecycle_is_reflected_on_models_and_versions(
+    store: MongoDBModelRegistryStore,
+):
+    first_version, second_version = _create_model_versions(store)
+
+    store.set_registered_model_alias(MODEL_NAME, "candidate", str(second_version.version))
+
+    assert store.get_registered_model(MODEL_NAME).aliases == {"candidate": second_version.version}
+    assert store.get_model_version(MODEL_NAME, first_version.version).aliases == []
+    assert store.get_model_version(MODEL_NAME, second_version.version).aliases == ["candidate"]
+    assert store.get_model_version_by_alias(MODEL_NAME, "candidate").version == (
+        second_version.version
+    )
+
+    store.set_registered_model_alias(MODEL_NAME, "candidate", first_version.version)
+    assert store.get_registered_model(MODEL_NAME).aliases == {"candidate": first_version.version}
+    assert store.get_model_version(MODEL_NAME, first_version.version).aliases == ["candidate"]
+    assert store.get_model_version(MODEL_NAME, second_version.version).aliases == []
+
+    store.delete_registered_model_alias(MODEL_NAME, "candidate")
+    assert store.get_registered_model(MODEL_NAME).aliases == {}
+    assert store.get_model_version(MODEL_NAME, first_version.version).aliases == []
+
+    with pytest.raises(
+        MlflowException,
+        match="alias candidate not found",
+    ) as missing_alias_error:
+        store.get_model_version_by_alias(MODEL_NAME, "candidate")
+    assert missing_alias_error.value.error_code == "INVALID_PARAMETER_VALUE"
+
+
+def test_deleting_alias_target_removes_alias(store: MongoDBModelRegistryStore):
+    _, second_version = _create_model_versions(store)
+    store.set_registered_model_alias(MODEL_NAME, "candidate", second_version.version)
+
+    store.delete_model_version(MODEL_NAME, second_version.version)
+
+    assert store.get_registered_model(MODEL_NAME).aliases == {}
+    with pytest.raises(MlflowException, match="alias candidate not found"):
+        store.get_model_version_by_alias(MODEL_NAME, "candidate")
+
+
+def test_alias_operations_validate_targets(store: MongoDBModelRegistryStore):
+    store.create_registered_model(MODEL_NAME)
+
+    with pytest.raises(MlflowException, match="Model Version") as missing_version_error:
+        store.set_registered_model_alias(MODEL_NAME, "candidate", 99)
+    assert missing_version_error.value.error_code == "RESOURCE_DOES_NOT_EXIST"
+
+    store.delete_registered_model(MODEL_NAME)
+    with pytest.raises(MlflowException, match="Registered Model") as missing_model_error:
+        store.delete_registered_model_alias(MODEL_NAME, "candidate")
+    assert missing_model_error.value.error_code == "RESOURCE_DOES_NOT_EXIST"
+
+
+def test_deleting_registered_model_makes_its_aliases_unresolvable(
+    store: MongoDBModelRegistryStore,
+):
+    _, second_version = _create_model_versions(store)
+    store.set_registered_model_alias(MODEL_NAME, "candidate", second_version.version)
+
+    store.delete_registered_model(MODEL_NAME)
+
+    with pytest.raises(MlflowException, match="Registered Model.*not found") as missing_error:
+        store.get_model_version_by_alias(MODEL_NAME, "candidate")
+    assert missing_error.value.error_code == "RESOURCE_DOES_NOT_EXIST"

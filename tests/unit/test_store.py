@@ -422,6 +422,40 @@ def test_resolve_source_fills_run_id_from_explicit_model_id(store, tracking_clie
     tracking_client.get_logged_model.assert_called_once_with("m-123")
 
 
+def test_create_model_version_fills_run_id_from_explicit_model_id(
+    store,
+    registered_model_repository,
+    model_version_repository,
+    tracking_client,
+    registered_model_record_factory,
+    model_version_record_factory,
+):
+    registered_model = registered_model_record_factory(name=MODEL_NAME)
+    version_record = model_version_record_factory(
+        registered_model_id=registered_model.model_id,
+        version=1,
+        source=SOURCE,
+        storage_location=SOURCE,
+        run_id="source-run",
+        model_id="m-123",
+    )
+    tracking_client.get_logged_model.return_value = SimpleNamespace(source_run_id="source-run")
+    registered_model_repository.find_by_name.return_value = registered_model
+    registered_model_repository.allocate_next_version.return_value = 1
+    model_version_repository.create.return_value = version_record
+
+    created = store.create_model_version(
+        MODEL_NAME,
+        SOURCE,
+        run_id=None,
+        model_id="m-123",
+    )
+
+    assert created.run_id == "source-run"
+    assert model_version_repository.create.call_args.kwargs["run_id"] == "source-run"
+    tracking_client.get_logged_model.assert_called_once_with("m-123")
+
+
 def test_transition_model_version_stage_converts_entity(
     store,
     registered_model_repository,

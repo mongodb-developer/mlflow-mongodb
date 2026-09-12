@@ -10,23 +10,18 @@ from pymongo import MongoClient
 from pymongo.errors import PyMongoError
 
 from mlflow_mongodb import MongoDBModelRegistryStore
-from mlflow_mongodb.repositories import (
-    ModelVersionRepository,
-    RegisteredModelRepository,
-)
 
 MONGODB_URI_ENV_VAR = "MONGODB_URI"
 SERVER_SELECTION_TIMEOUT_MS = 3_000
 TEST_DATABASE_PATTERN = re.compile(r"(^|[-_])test($|[-_])", re.IGNORECASE)
-APPLICATION_COLLECTIONS = (
-    ModelVersionRepository.COLLECTION_NAME,
-    RegisteredModelRepository.COLLECTION_NAME,
-)
 
 
 def _clear_application_collections(store: MongoDBModelRegistryStore) -> None:
     """Delete test documents without dropping collections or their indexes."""
-    for collection_name in APPLICATION_COLLECTIONS:
+    for collection_name in (
+        store._settings.model_versions_collection_name,
+        store._settings.registered_models_collection_name,
+    ):
         store._database[collection_name].delete_many({})
 
 

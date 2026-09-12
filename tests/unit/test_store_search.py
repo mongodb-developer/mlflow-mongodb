@@ -137,7 +137,27 @@ def test_parse_registered_model_order_adds_deterministic_name_tiebreaker():
     )
 
 
+def test_parse_registered_model_order_normalizes_timestamp_alias():
+    assert MongoDBModelRegistryStore._parse_registered_model_order(["timestamp DESC"]) == (
+        RegisteredModelOrder("last_updated_timestamp", False),
+        RegisteredModelOrder("name", True),
+    )
+
+    with pytest.raises(MlflowException, match="duplicate fields") as exc_info:
+        MongoDBModelRegistryStore._parse_registered_model_order([
+            "timestamp ASC",
+            "last_updated_timestamp DESC",
+        ])
+
+    assert exc_info.value.error_code == "INVALID_PARAMETER_VALUE"
+
+
 def test_parse_model_version_order_adds_deterministic_tiebreakers():
+    assert MongoDBModelRegistryStore._parse_model_version_order(None) == (
+        ModelVersionOrder("last_updated_timestamp", False),
+        ModelVersionOrder("name", True),
+        ModelVersionOrder("version_number", False),
+    )
     assert MongoDBModelRegistryStore._parse_model_version_order(["creation_timestamp ASC"]) == (
         ModelVersionOrder("creation_timestamp", True),
         ModelVersionOrder("name", True),
@@ -162,6 +182,26 @@ def test_parse_model_version_order_adds_deterministic_tiebreakers():
             MongoDBModelRegistryStore._parse_model_version_order,
             ["source_path ASC"],
             "Invalid attribute key",
+        ),
+        (
+            MongoDBModelRegistryStore._parse_registered_model_order,
+            ["name ASC", "creation_timestamp DESC"],
+            "Invalid order by key",
+        ),
+        (
+            MongoDBModelRegistryStore._parse_registered_model_order,
+            ["name ASC", "last_updated_timestamp DESC extra"],
+            "Invalid order_by clause",
+        ),
+        (
+            MongoDBModelRegistryStore._parse_model_version_order,
+            ["name ASC", "run_id DESC"],
+            "Invalid attribute key",
+        ),
+        (
+            MongoDBModelRegistryStore._parse_model_version_order,
+            ["name ASC", "last_updated_timestamp DESC extra"],
+            "Invalid order_by clause",
         ),
     ],
 )

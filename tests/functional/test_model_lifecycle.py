@@ -8,7 +8,6 @@ from mlflow.entities.model_registry import ModelVersionTag, RegisteredModelTag
 from mlflow.exceptions import MlflowException
 
 from mlflow_mongodb import MongoDBModelRegistryStore
-from mlflow_mongodb.repositories import ModelVersionRepository
 
 MODEL_NAME = "mongodb-functional-model"
 RENAMED_MODEL_NAME = "mongodb-functional-model-renamed"
@@ -116,7 +115,7 @@ def test_registered_model_and_version_lifecycle(store: MongoDBModelRegistryStore
         store.get_registered_model(RENAMED_MODEL_NAME)
     assert deleted_model_error.value.error_code == "RESOURCE_DOES_NOT_EXIST"
     assert (
-        store._database[ModelVersionRepository.COLLECTION_NAME].count_documents({
+        store._database[store._settings.model_versions_collection_name].count_documents({
             "registered_model_id": registered_model.model_id
         })
         == 0
