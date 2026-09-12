@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from bson import ObjectId
 from mlflow.entities.model_registry.model_version_stages import STAGE_DELETED_INTERNAL
+from mlflow.prompt.constants import IS_PROMPT_TAG_KEY
 from pymongo import ASCENDING, DESCENDING, ReturnDocument
 from pymongo.client_session import ClientSession
 from pymongo.database import Database
@@ -32,7 +33,6 @@ class RegisteredModelFilter:
     key: str
     comparator: Literal["=", "!=", "LIKE", "ILIKE"]
     value: str
-    include_missing: bool = False
 
 
 @dataclass(frozen=True)
@@ -656,7 +656,12 @@ class RegisteredModelRepository:
                 }
             }
         }
-        if not search_filter.include_missing:
+        # A missing ``is_prompt`` tag is treated as ``false`` by MLflow.
+        include_missing = search_filter.key == IS_PROMPT_TAG_KEY and (
+            (search_filter.comparator == "=" and search_filter.value.lower() == "false")
+            or (search_filter.comparator == "!=" and search_filter.value.lower() == "true")
+        )
+        if not include_missing:
             return tag_match
 
         return {

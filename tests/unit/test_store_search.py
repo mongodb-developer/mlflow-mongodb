@@ -40,7 +40,6 @@ def test_parse_registered_model_filters_adds_prompt_exclusion(
             IS_PROMPT_TAG_KEY,
             "!=",
             "true",
-            include_missing=True,
         ),
     )
 

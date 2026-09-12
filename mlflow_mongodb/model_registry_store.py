@@ -90,6 +90,8 @@ class MongoDBModelRegistryStore(AbstractStore):
     implementation surface that will be filled in as the backend is developed.
     """
 
+    _REGISTERED_MODEL_ORDER_KEYS = frozenset({"name", "last_updated_timestamp"})
+
     def __init__(self, store_uri=None, tracking_uri=None):
         super().__init__(store_uri=store_uri, tracking_uri=tracking_uri)
         self.store_uri = store_uri
@@ -138,6 +140,7 @@ class MongoDBModelRegistryStore(AbstractStore):
         self,
         details: RegisteredModelDetails,
     ) -> RegisteredModel:
+        """Convert repository details into an MLflow registered model."""
         return self._to_mlflow_registered_model(
             details.registered_model,
             details.latest_versions,
@@ -148,6 +151,7 @@ class MongoDBModelRegistryStore(AbstractStore):
         record: RegisteredModelRecord,
         latest_version_records: tuple[ModelVersionRecord, ...] = (),
     ) -> RegisteredModel:
+        """Convert a registered-model record and versions into an MLflow model."""
         return RegisteredModel(
             name=record.name,
             creation_timestamp=record.creation_timestamp,
@@ -167,6 +171,7 @@ class MongoDBModelRegistryStore(AbstractStore):
         record: ModelVersionRecord,
         registered_model: RegisteredModelRecord,
     ) -> ModelVersion:
+        """Convert a model-version record into an MLflow model version."""
         aliases = [
             alias.alias
             for alias in registered_model.aliases
@@ -191,6 +196,15 @@ class MongoDBModelRegistryStore(AbstractStore):
         )
 
     def _resolve_models_uri(self, parsed_model_uri, run_id):
+        """Resolve an internal ``models:/`` URI to an artifact location.
+
+        A ``models:/`` URI is a logical MLflow registry reference, not the
+        physical location of model files. It can refer either to a logged
+        model by ID or to a registered model version by name and version.
+
+        Returns the resolved artifact location and the supplied or inferred
+        source run ID.
+        """
         if parsed_model_uri.model_id is not None:
             model = self._tracking_client.get_logged_model(parsed_model_uri.model_id)
             return model.artifact_location, run_id or model.source_run_id
@@ -204,6 +218,15 @@ class MongoDBModelRegistryStore(AbstractStore):
         )
 
     def _resolve_model_version_source(self, source, run_id, model_id):
+        """Resolve a model-version source and infer its source run when possible.
+
+        ``source`` is preserved as the caller-provided value, while the
+        returned storage location is the physical artifact location used by
+        the registry. Direct artifact URIs are already resolved; internal
+        ``models:/`` URIs are looked up through the registry or tracking
+        store. A logged model ID can also provide a source run ID when one was
+        not explicitly supplied.
+        """
         storage_location = source
         if urllib.parse.urlparse(source).scheme == "models":
             parsed_model_uri = _parse_model_uri(source)
@@ -223,6 +246,10 @@ class MongoDBModelRegistryStore(AbstractStore):
 
     @staticmethod
     def _parse_registered_model_filters(filter_string):
+        """Parse an MLflow filter string into normalized repository filters.
+
+        For example, ``name = 'fraud-model'`` or ``tag.is_prompt = 'false'``.
+        """
         filter_string = add_prompt_filter_string(filter_string, is_prompt=False)
         parsed_filters = SearchModelUtils.parse_search_filter(filter_string)
 
@@ -242,23 +269,19 @@ class MongoDBModelRegistryStore(AbstractStore):
                 raise MlflowException.invalid_parameter_value(
                     f"Invalid search expression type: {field_type}"
                 )
-            include_missing = key == IS_PROMPT_TAG_KEY and (
-                (comparator == "=" and value.lower() == "false")
-                or (comparator == "!=" and value.lower() == "true")
-            )
             filters.append(
                 RegisteredModelFilter(
                     field_type=field_type,
                     key=key,
                     comparator=comparator,
                     value=value,
-                    include_missing=include_missing,
                 )
             )
         return tuple(filters)
 
-    @staticmethod
-    def _parse_registered_model_order(order_by):
+    @classmethod
+    def _parse_registered_model_order(cls, order_by):
+        """Parse registered-model order clauses and add a deterministic name tie-breaker."""
         parsed_order = []
         observed_fields = set()
         for order_by_clause in order_by or []:
@@ -271,10 +294,10 @@ class MongoDBModelRegistryStore(AbstractStore):
                 raise MlflowException.invalid_parameter_value(
                     f"Invalid order_by entity: {field_type}"
                 )
-            if key not in {"name", "last_updated_timestamp"}:
+            if key not in cls._REGISTERED_MODEL_ORDER_KEYS:
                 raise MlflowException(
                     f"Invalid order by key '{key}' specified. Valid keys are "
-                    "{'name', 'last_updated_timestamp'}",
+                    f"{cls._REGISTERED_MODEL_ORDER_KEYS}",
                     error_code=INVALID_PARAMETER_VALUE,
                 )
             if key in observed_fields:
@@ -284,12 +307,14 @@ class MongoDBModelRegistryStore(AbstractStore):
             observed_fields.add(key)
             parsed_order.append(RegisteredModelOrder(key=key, ascending=ascending))
 
+        # Use the model name as a deterministic tie-breaker and default ordering.
         if "name" not in observed_fields:
             parsed_order.append(RegisteredModelOrder(key="name", ascending=True))
         return tuple(parsed_order)
 
     @staticmethod
     def _parse_model_version_filters(filter_string):
+        """Parse model-version filter expressions into normalized repository filters."""
         parsed_filters = SearchModelVersionUtils.parse_search_filter(filter_string)
 
         filters = []
@@ -389,6 +414,18 @@ class MongoDBModelRegistryStore(AbstractStore):
         return tuple(parsed_order)
 
     def create_registered_model(self, name, tags=None, description=None, deployment_job_id=None):
+        """
+        Create a registered model.
+
+        Args:
+            name: Registered model name.
+            tags: Optional initial registered-model tags.
+            description: Optional model description.
+            deployment_job_id: Optional deployment job identifier.
+
+        Returns:
+            A single :py:class:`mlflow.entities.model_registry.RegisteredModel` object.
+        """
         _validate_model_name(name)
         tags_by_key = {}
         for tag in tags or []:
@@ -419,6 +456,17 @@ class MongoDBModelRegistryStore(AbstractStore):
         return self._to_mlflow_registered_model(record)
 
     def update_registered_model(self, name, description, deployment_job_id=None):
+        """
+        Update a registered model's description and deployment job.
+
+        Args:
+            name: Registered model name.
+            description: New model description.
+            deployment_job_id: Optional deployment job identifier.
+
+        Returns:
+            A single :py:class:`mlflow.entities.model_registry.RegisteredModel` object.
+        """
         _validate_model_name(name)
         deployment_job_id = str(deployment_job_id) if deployment_job_id is not None else None
 
@@ -442,6 +490,16 @@ class MongoDBModelRegistryStore(AbstractStore):
         return self._to_mlflow_registered_model(record, latest_version_records)
 
     def rename_registered_model(self, name, new_name):
+        """
+        Rename a registered model.
+
+        Args:
+            name: Current registered model name.
+            new_name: New registered model name.
+
+        Returns:
+            A single :py:class:`mlflow.entities.model_registry.RegisteredModel` object.
+        """
         _validate_model_name(name)
         _validate_model_renaming(new_name)
 
@@ -474,6 +532,12 @@ class MongoDBModelRegistryStore(AbstractStore):
         return self._to_mlflow_registered_model(record, latest_version_records)
 
     def delete_registered_model(self, name):
+        """
+        Delete a registered model and its model versions.
+
+        Args:
+            name: Registered model name.
+        """
         _validate_model_name(name)
 
         try:
@@ -493,6 +557,18 @@ class MongoDBModelRegistryStore(AbstractStore):
     def search_registered_models(
         self, filter_string=None, max_results=None, order_by=None, page_token=None
     ):
+        """
+        Search registered models using MLflow filter and ordering expressions.
+
+        Args:
+            filter_string: Optional MLflow registered-model filter expression.
+            max_results: Maximum number of models to return.
+            order_by: Optional list of MLflow ordering expressions.
+            page_token: Optional token for retrieving the next page.
+
+        Returns:
+            A paginated list of :py:class:`mlflow.entities.model_registry.RegisteredModel` objects.
+        """
         if max_results is None:
             max_results = SEARCH_REGISTERED_MODEL_MAX_RESULTS_DEFAULT
         if not isinstance(max_results, int) or max_results < 1:
@@ -530,6 +606,15 @@ class MongoDBModelRegistryStore(AbstractStore):
         )
 
     def get_registered_model(self, name):
+        """
+        Retrieve a registered model by name.
+
+        Args:
+            name: Registered model name.
+
+        Returns:
+            A single :py:class:`mlflow.entities.model_registry.RegisteredModel` object.
+        """
         _validate_model_name(name)
 
         details = self._registered_model_repository.find_by_name_with_latest_versions(name)
@@ -542,6 +627,16 @@ class MongoDBModelRegistryStore(AbstractStore):
         return self._to_mlflow_registered_model_details(details)
 
     def get_latest_versions(self, name, stages=None):
+        """
+        Retrieve the latest model versions for the requested stages.
+
+        Args:
+            name: Registered model name.
+            stages: Optional list of stages to filter by.
+
+        Returns:
+            A list of :py:class:`mlflow.entities.model_registry.ModelVersion` objects.
+        """
         _validate_model_name(name)
 
         requested_stages = ALL_STAGES if stages is None or len(stages) == 0 else stages
@@ -564,6 +659,13 @@ class MongoDBModelRegistryStore(AbstractStore):
         ]
 
     def set_registered_model_tag(self, name, tag):
+        """
+        Set a tag on a registered model.
+
+        Args:
+            name: Registered model name.
+            tag: Registered-model tag to set.
+        """
         _validate_model_name(name)
         _validate_registered_model_tag(tag.key, tag.value)
 
@@ -580,6 +682,13 @@ class MongoDBModelRegistryStore(AbstractStore):
             ) from exc
 
     def delete_registered_model_tag(self, name, key):
+        """
+        Delete a tag from a registered model.
+
+        Args:
+            name: Registered model name.
+            key: Tag key to delete.
+        """
         _validate_model_name(name)
         _validate_tag_name(key)
 
@@ -592,6 +701,14 @@ class MongoDBModelRegistryStore(AbstractStore):
             ) from exc
 
     def set_registered_model_alias(self, name, alias, version):
+        """
+        Assign an alias to a registered model version.
+
+        Args:
+            name: Registered model name.
+            alias: Alias name to assign.
+            version: Model-version number targeted by the alias.
+        """
         _validate_model_name(name)
         _validate_model_alias_name(alias)
         _validate_model_alias_name_reserved(alias)
@@ -623,6 +740,13 @@ class MongoDBModelRegistryStore(AbstractStore):
             ) from exc
 
     def delete_registered_model_alias(self, name, alias):
+        """
+        Delete an alias from a registered model.
+
+        Args:
+            name: Registered model name.
+            alias: Alias name to delete.
+        """
         _validate_model_name(name)
         _validate_model_alias_name(alias)
 
@@ -648,6 +772,25 @@ class MongoDBModelRegistryStore(AbstractStore):
         local_model_path=None,
         model_id=None,
     ):
+        """
+        Create a new model version from given source and run ID.
+
+        Args:
+            name: Registered model name.
+            source: URI indicating the location of the model artifacts.
+            run_id: Run ID from MLflow tracking server that generated the model.
+            tags: A list of :py:class:`mlflow.entities.model_registry.ModelVersionTag`
+                instances associated with this model version.
+            run_link: Link to the run from an MLflow tracking server that generated this model.
+            description: Description of the version.
+            local_model_path: Unused.
+            model_id: The ID of the model (from an Experiment) that is being promoted to a
+                registered model version, if applicable.
+
+        Returns:
+            A single object of :py:class:`mlflow.entities.model_registry.ModelVersion`
+            created in the backend.
+        """
         _validate_model_name(name)
         tags_by_key = {}
         for tag in tags or []:
@@ -704,6 +847,17 @@ class MongoDBModelRegistryStore(AbstractStore):
         return self._to_mlflow_model_version(record, registered_model)
 
     def update_model_version(self, name, version, description):
+        """
+        Update a model version's description.
+
+        Args:
+            name: Registered model name.
+            version: Registered model version.
+            description: New model-version description.
+
+        Returns:
+            A single :py:class:`mlflow.entities.model_registry.ModelVersion` object.
+        """
         _validate_model_name(name)
         _validate_model_version(version)
         version = int(version)
@@ -731,6 +885,19 @@ class MongoDBModelRegistryStore(AbstractStore):
         return self._to_mlflow_model_version(record, registered_model)
 
     def transition_model_version_stage(self, name, version, stage, archive_existing_versions):
+        """
+        Update a model version stage.
+
+        Args:
+            name: Registered model name.
+            version: Registered model version.
+            stage: New desired stage for this model version.
+            archive_existing_versions: If ``True``, archive all existing model versions in the
+                target stage. This is valid only for active stages; otherwise, an error is raised.
+
+        Returns:
+            A single :py:class:`mlflow.entities.model_registry.ModelVersion` object.
+        """
         canonical_stage = get_canonical_stage(stage)
         if (
             archive_existing_versions
@@ -789,6 +956,13 @@ class MongoDBModelRegistryStore(AbstractStore):
         return self._to_mlflow_model_version(record, registered_model)
 
     def delete_model_version(self, name, version):
+        """
+        Delete a model version.
+
+        Args:
+            name: Registered model name.
+            version: Registered model version.
+        """
         _validate_model_name(name)
         _validate_model_version(version)
         version = int(version)
@@ -826,6 +1000,16 @@ class MongoDBModelRegistryStore(AbstractStore):
             ) from exc
 
     def get_model_version(self, name, version):
+        """
+        Retrieve a model version by registered-model name and version.
+
+        Args:
+            name: Registered model name.
+            version: Registered model version.
+
+        Returns:
+            A single :py:class:`mlflow.entities.model_registry.ModelVersion` object.
+        """
         _validate_model_name(name)
         _validate_model_version(version)
         version = int(version)
@@ -848,6 +1032,16 @@ class MongoDBModelRegistryStore(AbstractStore):
         return self._to_mlflow_model_version(model_version, registered_model)
 
     def get_model_version_download_uri(self, name, version):
+        """
+        Retrieve the artifact URI for a model version.
+
+        Args:
+            name: Registered model name.
+            version: Registered model version.
+
+        Returns:
+            The resolved model artifact URI.
+        """
         _validate_model_name(name)
         _validate_model_version(version)
         version = int(version)
@@ -872,6 +1066,18 @@ class MongoDBModelRegistryStore(AbstractStore):
     def search_model_versions(
         self, filter_string=None, max_results=None, order_by=None, page_token=None
     ):
+        """
+        Search model versions using MLflow filter and ordering expressions.
+
+        Args:
+            filter_string: Optional MLflow model-version filter expression.
+            max_results: Maximum number of model versions to return.
+            order_by: Optional list of MLflow ordering expressions.
+            page_token: Optional token for retrieving the next page.
+
+        Returns:
+            A paginated list of :py:class:`mlflow.entities.model_registry.ModelVersion` objects.
+        """
         if max_results is None:
             max_results = SEARCH_MODEL_VERSION_MAX_RESULTS_DEFAULT
         if not isinstance(max_results, int) or max_results < 1:
@@ -917,6 +1123,14 @@ class MongoDBModelRegistryStore(AbstractStore):
         )
 
     def set_model_version_tag(self, name, version, tag):
+        """
+        Set a tag on a model version.
+
+        Args:
+            name: Registered model name.
+            version: Registered model version.
+            tag: Model-version tag to set.
+        """
         _validate_model_name(name)
         _validate_model_version(version)
         version = int(version)
@@ -943,6 +1157,14 @@ class MongoDBModelRegistryStore(AbstractStore):
             ) from exc
 
     def delete_model_version_tag(self, name, version, key):
+        """
+        Delete a tag from a model version.
+
+        Args:
+            name: Registered model name.
+            version: Registered model version.
+            key: Tag key to delete.
+        """
         _validate_model_name(name)
         _validate_model_version(version)
         version = int(version)
@@ -968,6 +1190,16 @@ class MongoDBModelRegistryStore(AbstractStore):
             ) from exc
 
     def get_model_version_by_alias(self, name, alias):
+        """
+        Retrieve the model version targeted by an alias.
+
+        Args:
+            name: Registered model name.
+            alias: Alias name.
+
+        Returns:
+            A single :py:class:`mlflow.entities.model_registry.ModelVersion` object.
+        """
         _validate_model_name(name)
         _validate_model_alias_name(alias)
 
