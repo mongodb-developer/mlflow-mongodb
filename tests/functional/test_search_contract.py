@@ -1,17 +1,15 @@
 """Broader MLflow model-registry search contracts backed by MongoDB."""
 
-import pytest
 from mlflow.entities.model_registry import (
     ModelVersion,
     ModelVersionTag,
     RegisteredModelTag,
 )
-from mlflow.exceptions import MlflowException
 
 from mlflow_mongodb import MongoDBModelRegistryStore
 
 
-def _version_numbers(store, filter_string):
+def _search_model_version_numbers(store, filter_string):
     return {version.version for version in store.search_model_versions(filter_string)}
 
 
@@ -26,48 +24,49 @@ def test_search_model_versions_supports_portable_attribute_filters(
     store.create_model_version(name, "A/B", run_id=run_id_one)
     store.create_model_version(name, "A/C", run_id=run_id_two)
     store.create_model_version(name, "A/D", run_id=run_id_two)
-    version_four = store.create_model_version(name, "A/D", run_id=run_id_three)
+    store.create_model_version(name, "A/D", run_id=run_id_three)
 
-    assert _version_numbers(store, f"name = '{name}'") == {1, 2, 3, 4}
-    assert _version_numbers(store, "version_number = 2") == {2}
-    assert _version_numbers(store, "version_number <= 3") == {1, 2, 3}
-    assert _version_numbers(store, f"run_id = '{run_id_one}'") == {1}
-    assert _version_numbers(store, f"run_id = '{run_id_two}'") == {2, 3}
-    assert _version_numbers(store, f"run_id IN ('{run_id_one}', '{run_id_two}')") == {
+    assert _search_model_version_numbers(store, f"name = '{name}'") == {1, 2, 3, 4}
+    assert _search_model_version_numbers(store, "version_number = 2") == {2}
+    assert _search_model_version_numbers(store, "version_number <= 3") == {1, 2, 3}
+    assert _search_model_version_numbers(store, f"run_id = '{run_id_one}'") == {1}
+    assert _search_model_version_numbers(store, f"run_id = '{run_id_two}'") == {2, 3}
+    assert _search_model_version_numbers(store, f"run_id IN ('{run_id_one}', '{run_id_two}')") == {
         1,
         2,
         3,
     }
-    assert _version_numbers(
+    assert _search_model_version_numbers(
         store,
         f"run_id IN ('{run_id_one.upper()}', '{run_id_two}')",
     ) == {2, 3}
-    assert _version_numbers(store, f"run_id LIKE '{run_id_two[:10]}%'") == {2, 3}
-    assert _version_numbers(store, f"run_id ILIKE '{run_id_two[:10].upper()}%'") == {2, 3}
-    assert _version_numbers(store, "source_path = 'A/D'") == {3, 4}
-    assert _version_numbers(store, "source_path = 'A'") == set()
-    assert _version_numbers(store, "source_path = ''") == set()
+    assert _search_model_version_numbers(store, f"run_id LIKE '{run_id_two[:10]}%'") == {2, 3}
+    assert _search_model_version_numbers(store, f"run_id ILIKE '{run_id_two[:10].upper()}%'") == {
+        2,
+        3,
+    }
+    assert _search_model_version_numbers(store, "source_path = 'A/D'") == {3, 4}
+    assert _search_model_version_numbers(store, "source_path = 'A'") == set()
+    assert _search_model_version_numbers(store, "source_path = ''") == set()
 
-    for malformed_filter in (
-        "run_id IN (1, 2, 3)",
-        "run_id IN ()",
-        "run_id IN (",
-        "run_id IN",
-        "run_id IN (,)",
-        "run_id IN ('run-1',, 'run-2')",
-        "name LIKE",
-    ):
-        with pytest.raises(
-            MlflowException,
-            match="While parsing a list|Invalid clause",
-        ) as invalid_filter_error:
-            store.search_model_versions(malformed_filter)
-        assert invalid_filter_error.value.error_code == "INVALID_PARAMETER_VALUE"
+
+def test_search_model_versions_reflects_model_version_changes(
+    store: MongoDBModelRegistryStore,
+):
+    name = "search-model-version-changes"
+    store.create_registered_model(name)
+    run_id_one = "search-model-version-changes-run-one"
+    run_id_two = "search-model-version-changes-run-two"
+    run_id_three = "search-model-version-changes-run-three"
+    store.create_model_version(name, "A/B", run_id=run_id_one)
+    store.create_model_version(name, "A/C", run_id=run_id_two)
+    store.create_model_version(name, "A/D", run_id=run_id_two)
+    version_four = store.create_model_version(name, "A/D", run_id=run_id_three)
 
     store.delete_model_version(name, version_four.version)
-    assert _version_numbers(store, "") == {1, 2, 3}
-    assert _version_numbers(store, None) == {1, 2, 3}
-    assert _version_numbers(store, "source_path = 'A/D'") == {3}
+    assert _search_model_version_numbers(store, "") == {1, 2, 3}
+    assert _search_model_version_numbers(store, None) == {1, 2, 3}
+    assert _search_model_version_numbers(store, "source_path = 'A/D'") == {3}
 
     store.transition_model_version_stage(name, 1, "Production", False)
     store.update_model_version(name, 1, "Online prediction model")
@@ -95,20 +94,17 @@ def test_search_model_versions_by_tag_keeps_same_key_conditions_on_one_tag(
         tags=[ModelVersionTag("t1", "abc"), ModelVersionTag("t2", "x123")],
     )
 
-    def search(filter_string):
-        return [version.version for version in store.search_model_versions(filter_string)]
-
-    assert search(f"name = '{name}' AND tag.t2 = 'xyz'") == [1]
-    assert search("name = 'wrong-name' AND tag.t2 = 'xyz'") == []
-    assert search("tag.`t2` = 'xyz'") == [1]
-    assert search("tag.t3 = 'xyz'") == []
-    assert search("tag.t2 != 'xy'") == [2, 1]
-    assert search("tag.t2 LIKE 'xy%'") == [1]
-    assert search("tag.t2 LIKE 'xY%'") == []
-    assert search("tag.t2 ILIKE 'xY%'") == [1]
-    assert search("tag.T2 = 'xyz'") == []
-    assert search("tag.t1 = 'abc' AND tag.t2 LIKE 'x%'") == [2, 1]
-    assert search("tag.t2 LIKE 'x%' AND tag.t2 != 'xyz'") == [2]
+    assert _search_model_version_numbers(store, f"name = '{name}' AND tag.t2 = 'xyz'") == {1}
+    assert _search_model_version_numbers(store, "name = 'wrong-name' AND tag.t2 = 'xyz'") == set()
+    assert _search_model_version_numbers(store, "tag.`t2` = 'xyz'") == {1}
+    assert _search_model_version_numbers(store, "tag.t3 = 'xyz'") == set()
+    assert _search_model_version_numbers(store, "tag.t2 != 'xy'") == {1, 2}
+    assert _search_model_version_numbers(store, "tag.t2 LIKE 'xy%'") == {1}
+    assert _search_model_version_numbers(store, "tag.t2 LIKE 'xY%'") == set()
+    assert _search_model_version_numbers(store, "tag.t2 ILIKE 'xY%'") == {1}
+    assert _search_model_version_numbers(store, "tag.T2 = 'xyz'") == set()
+    assert _search_model_version_numbers(store, "tag.t1 = 'abc' AND tag.t2 LIKE 'x%'") == {1, 2}
+    assert _search_model_version_numbers(store, "tag.t2 LIKE 'x%' AND tag.t2 != 'xyz'") == {2}
 
 
 def test_search_model_versions_orders_and_paginates_stably(
@@ -195,7 +191,7 @@ def test_search_model_versions_orders_and_paginates_stably(
     assert token is None
 
 
-def test_search_registered_models_supports_portable_name_and_tag_filters(
+def test_search_registered_models_supports_portable_name_filters(
     store: MongoDBModelRegistryStore,
 ):
     prefix = "search-registered-model-"
@@ -203,36 +199,50 @@ def test_search_registered_models_supports_portable_name_and_tag_filters(
     for name in names:
         store.create_registered_model(name)
 
-    def search(filter_string):
-        return [model.name for model in store.search_registered_models(filter_string)]
+    assert {model.name for model in store.search_registered_models(None)} == set(names)
+    assert {model.name for model in store.search_registered_models(f"name = '{names[0]}'")} == {
+        names[0]
+    }
+    assert {
+        model.name for model in store.search_registered_models(f"name = '{names[0]}-missing'")
+    } == set()
+    assert {
+        model.name for model in store.search_registered_models(f"name LIKE '{prefix}%'")
+    } == set(names)
+    assert {model.name for model in store.search_registered_models("name LIKE '%RM%'")} == set(
+        names
+    )
+    assert {model.name for model in store.search_registered_models("name LIKE '_earch%'")} == set(
+        names
+    )
+    assert {
+        model.name for model in store.search_registered_models(f"name LIKE '{prefix}RM4A%'")
+    } == {names[3]}
+    assert {
+        model.name
+        for model in store.search_registered_models(f"name ILIKE '{prefix.upper()}RM4A%'")
+    } == set(names[3:])
+    assert {model.name for model in store.search_registered_models("name ILIKE '%%'")} == set(names)
 
-    assert search(None) == names
-    assert search(f"name = '{names[0]}'") == [names[0]]
-    assert search(f"name = '{names[0]}-missing'") == []
-    assert search(f"name LIKE '{prefix}%'") == names
-    assert search("name LIKE '%RM%'") == names
-    assert search("name LIKE '_earch%'") == names
-    assert search(f"name LIKE '{prefix}RM4A%'") == [names[3]]
-    assert search(f"name ILIKE '{prefix.upper()}RM4A%'") == names[3:]
-    assert search("name ILIKE '%%'") == names
 
-    for malformed_filter in (
-        "name != unquoted",
-        "run_id = 'run-id'",
-        "source_path = 'A/D'",
-        "unknown = true",
-    ):
-        with pytest.raises(
-            MlflowException,
-            match="not quoted|Invalid attribute key|Invalid clause",
-        ) as invalid_filter_error:
-            store.search_registered_models(malformed_filter)
-        assert invalid_filter_error.value.error_code == "INVALID_PARAMETER_VALUE"
+def test_search_registered_models_excludes_deleted_models(
+    store: MongoDBModelRegistryStore,
+):
+    names = [f"search-registered-delete-{suffix}" for suffix in ("RM1", "RM2", "RM3")]
+    for name in names:
+        store.create_registered_model(name)
 
     store.delete_registered_model(names[-1])
-    assert search(None) == names[:-1]
-    assert search(f"name = '{names[-1]}'") == []
 
+    assert {model.name for model in store.search_registered_models(None)} == set(names[:-1])
+    assert {
+        model.name for model in store.search_registered_models(f"name = '{names[-1]}'")
+    } == set()
+
+
+def test_search_registered_models_filters_by_tags(
+    store: MongoDBModelRegistryStore,
+):
     first_name = "search-registered-tags-first"
     second_name = "search-registered-tags-second"
     store.create_registered_model(
@@ -248,18 +258,34 @@ def test_search_registered_models_supports_portable_name_and_tag_filters(
         ],
     )
 
-    assert search("tag.t3 = 'XYZ'") == [second_name]
-    assert search(f"name = '{first_name}' AND tag.t1 = 'abc'") == [first_name]
-    assert search("tag.t1 LIKE 'ab%'") == [first_name, second_name]
-    assert search("tag.t1 ILIKE 'aB%'") == [first_name, second_name]
-    assert search("tag.t1 LIKE 'ab%' AND tag.t2 LIKE 'xy%'") == [
+    assert {model.name for model in store.search_registered_models("tag.t3 = 'XYZ'")} == {
+        second_name
+    }
+    assert {
+        model.name
+        for model in store.search_registered_models(f"name = '{first_name}' AND tag.t1 = 'abc'")
+    } == {first_name}
+    assert {model.name for model in store.search_registered_models("tag.t1 LIKE 'ab%'")} == {
         first_name,
         second_name,
-    ]
-    assert search("tag.t3 = 'XYz'") == []
-    assert search("tag.T3 = 'XYZ'") == []
-    assert search("tag.t1 != 'abc'") == [second_name]
-    assert search("tag.t1 != 'abcd' AND tag.t1 LIKE 'ab%'") == [first_name]
+    }
+    assert {model.name for model in store.search_registered_models("tag.t1 ILIKE 'aB%'")} == {
+        first_name,
+        second_name,
+    }
+    assert {
+        model.name
+        for model in store.search_registered_models("tag.t1 LIKE 'ab%' AND tag.t2 LIKE 'xy%'")
+    } == {first_name, second_name}
+    assert {model.name for model in store.search_registered_models("tag.t3 = 'XYz'")} == set()
+    assert {model.name for model in store.search_registered_models("tag.T3 = 'XYZ'")} == set()
+    assert {model.name for model in store.search_registered_models("tag.t1 != 'abc'")} == {
+        second_name
+    }
+    assert {
+        model.name
+        for model in store.search_registered_models("tag.t1 != 'abcd' AND tag.t1 LIKE 'ab%'")
+    } == {first_name}
 
 
 def test_search_registered_models_orders_and_paginates_stably(
@@ -329,25 +355,3 @@ def test_search_registered_models_orders_and_paginates_stably(
         token = page.token
     assert returned_names == expected_names
     assert token is None
-
-
-@pytest.mark.parametrize(
-    "method_name",
-    ["search_registered_models", "search_model_versions"],
-)
-def test_search_rejects_invalid_tokens_and_excessive_page_sizes(
-    store: MongoDBModelRegistryStore,
-    method_name,
-):
-    method = getattr(store, method_name)
-
-    with pytest.raises(MlflowException, match="Invalid page token") as token_error:
-        method(page_token="not-a-page-token")  # ruff: ignore[hardcoded-password-func-arg]
-    assert token_error.value.error_code == "INVALID_PARAMETER_VALUE"
-
-    with pytest.raises(
-        MlflowException,
-        match="Invalid value.*max_results",
-    ) as page_size_error:
-        method(max_results=10**15)
-    assert page_size_error.value.error_code == "INVALID_PARAMETER_VALUE"

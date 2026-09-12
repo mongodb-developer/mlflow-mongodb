@@ -27,7 +27,7 @@ def test_get_latest_alias_returns_latest_version_without_stored_alias(
     latest_version = model_version_record_factory(
         registered_model_id=registered_model.model_id,
         version=2,
-        source="s3://models/fraud-detector/2",
+        source=f"s3://models/{MODEL_NAME}/2",
     )
     registered_model_repository.find_latest_version_by_name.return_value = (
         registered_model_details_factory(

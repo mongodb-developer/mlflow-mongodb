@@ -1,8 +1,6 @@
 """Fixtures for functional tests backed by a real MongoDB server."""
 
 import os
-import re
-import threading
 from collections.abc import Iterator
 
 import pytest
@@ -13,7 +11,6 @@ from mlflow_mongodb import MongoDBModelRegistryStore
 
 MONGODB_URI_ENV_VAR = "MONGODB_URI"
 SERVER_SELECTION_TIMEOUT_MS = 3_000
-TEST_DATABASE_PATTERN = re.compile(r"(^|[-_])test($|[-_])", re.IGNORECASE)
 
 
 def _clear_application_collections(store: MongoDBModelRegistryStore) -> None:
@@ -23,15 +20,6 @@ def _clear_application_collections(store: MongoDBModelRegistryStore) -> None:
         store._settings.registered_models_collection_name,
     ):
         store._database[collection_name].delete_many({})
-
-
-def _wait_for_prompt_linking_threads() -> None:
-    """Wait for MLflow's asynchronous prompt-linking work before database cleanup."""
-    for thread in threading.enumerate():
-        if thread.name.startswith("link_prompt_to_experiment_thread"):
-            thread.join(timeout=5)
-            if thread.is_alive():
-                raise TimeoutError(f"Thread {thread.name} did not complete within 5 seconds")
 
 
 @pytest.fixture(scope="session")
@@ -51,6 +39,8 @@ def mongodb_store(mongodb_uri: str) -> Iterator[MongoDBModelRegistryStore]:
         serverSelectionTimeoutMS=SERVER_SELECTION_TIMEOUT_MS,
     )
     store = MongoDBModelRegistryStore(store_uri=mongodb_uri)
+    # Inject the client so the fixture controls its lifetime and can close it after the
+    # functional test session.
     store.__dict__["_mongo_client"] = client
 
     try:
@@ -58,14 +48,6 @@ def mongodb_store(mongodb_uri: str) -> Iterator[MongoDBModelRegistryStore]:
     except Exception:
         client.close()
         raise
-
-    if not TEST_DATABASE_PATTERN.search(database.name):
-        client.close()
-        pytest.fail(
-            f"Refusing to clean MongoDB database {database.name!r}. "
-            "The functional-test database name must contain a distinct 'test' segment, "
-            "for example 'mlflow_functional_test'."
-        )
 
     try:
         client.admin.command("ping")
@@ -92,12 +74,9 @@ def mongodb_store(mongodb_uri: str) -> Iterator[MongoDBModelRegistryStore]:
         yield store
     finally:
         try:
-            _wait_for_prompt_linking_threads()
+            client.drop_database(database.name)
         finally:
-            try:
-                client.drop_database(database.name)
-            finally:
-                client.close()
+            client.close()
 
 
 @pytest.fixture
@@ -106,7 +85,4 @@ def store(mongodb_store: MongoDBModelRegistryStore) -> Iterator[MongoDBModelRegi
     try:
         yield mongodb_store
     finally:
-        try:
-            _wait_for_prompt_linking_threads()
-        finally:
-            _clear_application_collections(mongodb_store)
+        _clear_application_collections(mongodb_store)

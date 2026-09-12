@@ -8,10 +8,6 @@ from mlflow.exceptions import MlflowException
 from mlflow_mongodb import MongoDBModelRegistryStore
 
 
-def _assert_error_code(exc_info, expected_code):
-    assert exc_info.value.error_code == expected_code
-
-
 def test_model_version_create_update_and_stage_validation_contract(
     store: MongoDBModelRegistryStore,
     monkeypatch,
@@ -79,7 +75,7 @@ def test_model_version_create_update_and_stage_validation_contract(
         match="Invalid Model Version stage",
     ) as invalid_stage_error:
         store.transition_model_version_stage(name, version.version, "unknown", False)
-    _assert_error_code(invalid_stage_error, "INVALID_PARAMETER_VALUE")
+    assert invalid_stage_error.value.error_code == "INVALID_PARAMETER_VALUE"
 
 
 def test_transition_without_archiving_preserves_other_active_versions(
@@ -195,7 +191,7 @@ def test_deleted_model_version_is_redacted_and_unavailable(
     for operation in operations:
         with pytest.raises(MlflowException, match="Model Version.*not found") as missing_error:
             operation()
-        _assert_error_code(missing_error, "RESOURCE_DOES_NOT_EXIST")
+        assert missing_error.value.error_code == "RESOURCE_DOES_NOT_EXIST"
 
 
 def test_model_version_tags_replace_delete_and_remain_isolated(
@@ -270,7 +266,7 @@ def test_model_version_tags_replace_delete_and_remain_isolated(
             first_version.version,
             ModelVersionTag("longTagKey", "a" * 100_001),
         )
-    _assert_error_code(long_tag_error, "INVALID_PARAMETER_VALUE")
+    assert long_tag_error.value.error_code == "INVALID_PARAMETER_VALUE"
 
     store.delete_model_version(second_name, second_version.version)
     for operation in (
@@ -283,7 +279,7 @@ def test_model_version_tags_replace_delete_and_remain_isolated(
     ):
         with pytest.raises(MlflowException, match="Model Version.*not found") as missing_error:
             operation()
-        _assert_error_code(missing_error, "RESOURCE_DOES_NOT_EXIST")
+        assert missing_error.value.error_code == "RESOURCE_DOES_NOT_EXIST"
 
     with pytest.raises(
         MlflowException,
@@ -294,7 +290,7 @@ def test_model_version_tags_replace_delete_and_remain_isolated(
             first_version.version,
             ModelVersionTag(key=None, value=""),
         )
-    _assert_error_code(invalid_tag_error, "INVALID_PARAMETER_VALUE")
+    assert invalid_tag_error.value.error_code == "INVALID_PARAMETER_VALUE"
 
     invalid_operations = (
         (
@@ -336,7 +332,7 @@ def test_model_version_tags_replace_delete_and_remain_isolated(
             match=expected_message,
         ) as invalid_parameter_error:
             operation()
-        _assert_error_code(invalid_parameter_error, "INVALID_PARAMETER_VALUE")
+        assert invalid_parameter_error.value.error_code == "INVALID_PARAMETER_VALUE"
 
 
 @pytest.mark.parametrize("copy_to_same_model", [False, True])

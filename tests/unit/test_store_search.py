@@ -231,3 +231,54 @@ def test_search_rejects_negative_page_offset(store, method_name):
         getattr(store, method_name)(page_token=SearchUtils.create_page_token(-1))
 
     assert exc_info.value.error_code == "INVALID_PARAMETER_VALUE"
+
+
+def test_search_model_versions_rejects_malformed_filters(store):
+    for malformed_filter in (
+        "run_id IN (1, 2, 3)",
+        "run_id IN ()",
+        "run_id IN (",
+        "run_id IN",
+        "run_id IN (,)",
+        "run_id IN ('run-1',, 'run-2')",
+        "name LIKE",
+    ):
+        with pytest.raises(
+            MlflowException,
+            match="While parsing a list|Invalid clause",
+        ) as invalid_filter_error:
+            store.search_model_versions(malformed_filter)
+
+        assert invalid_filter_error.value.error_code == "INVALID_PARAMETER_VALUE"
+
+
+def test_search_registered_models_rejects_malformed_filters(store):
+    for malformed_filter in (
+        "name != unquoted",
+        "run_id = 'run-id'",
+        "source_path = 'A/D'",
+        "unknown = true",
+    ):
+        with pytest.raises(
+            MlflowException,
+            match="not quoted|Invalid attribute key|Invalid clause",
+        ) as invalid_filter_error:
+            store.search_registered_models(malformed_filter)
+
+        assert invalid_filter_error.value.error_code == "INVALID_PARAMETER_VALUE"
+
+
+@pytest.mark.parametrize("method_name", ["search_registered_models", "search_model_versions"])
+def test_search_rejects_invalid_tokens_and_excessive_page_sizes(store, method_name):
+    method = getattr(store, method_name)
+
+    with pytest.raises(MlflowException, match="Invalid page token") as token_error:
+        method(page_token="not-a-page-token")  # ruff: ignore[hardcoded-password-func-arg]
+    assert token_error.value.error_code == "INVALID_PARAMETER_VALUE"
+
+    with pytest.raises(
+        MlflowException,
+        match="Invalid value.*max_results",
+    ) as page_size_error:
+        method(max_results=10**15)
+    assert page_size_error.value.error_code == "INVALID_PARAMETER_VALUE"

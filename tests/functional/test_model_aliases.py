@@ -13,7 +13,8 @@ SUPPORTS_LATEST_ALIAS_LOOKUP = hasattr(
 )
 
 
-def _create_model_versions(store: MongoDBModelRegistryStore):
+@pytest.fixture
+def model_versions(store: MongoDBModelRegistryStore):
     store.create_registered_model(MODEL_NAME)
     first_version = store.create_model_version(
         MODEL_NAME,
@@ -30,8 +31,11 @@ def _create_model_versions(store: MongoDBModelRegistryStore):
     not SUPPORTS_LATEST_ALIAS_LOOKUP,
     reason="MLflow before 3.3 rejects the reserved latest alias during basic validation",
 )
-def test_latest_alias_resolves_without_being_stored(store: MongoDBModelRegistryStore):
-    _, expected_version = _create_model_versions(store)
+def test_latest_alias_resolves_without_being_stored(
+    store: MongoDBModelRegistryStore,
+    model_versions,
+):
+    _, expected_version = model_versions
 
     resolved_version = store.get_model_version_by_alias(MODEL_NAME, "LaTeSt")
 
@@ -56,14 +60,15 @@ def test_latest_alias_raises_when_model_has_no_versions(store: MongoDBModelRegis
     reason="MLflow 3.3 and newer support latest as a virtual lookup alias",
 )
 def test_mlflow_before_3_3_rejects_latest_alias_lookup(store: MongoDBModelRegistryStore):
-    _create_model_versions(store)
-
     with pytest.raises(MlflowException, match="latest.*reserved"):
         store.get_model_version_by_alias(MODEL_NAME, "latest")
 
 
-def test_latest_alias_cannot_be_stored(store: MongoDBModelRegistryStore):
-    first_version, _ = _create_model_versions(store)
+def test_latest_alias_cannot_be_stored(
+    store: MongoDBModelRegistryStore,
+    model_versions,
+):
+    first_version, _ = model_versions
 
     with pytest.raises(MlflowException, match="latest.*reserved"):
         store.set_registered_model_alias(MODEL_NAME, "LaTeSt", first_version.version)
@@ -73,8 +78,9 @@ def test_latest_alias_cannot_be_stored(store: MongoDBModelRegistryStore):
 
 def test_stored_alias_lifecycle_is_reflected_on_models_and_versions(
     store: MongoDBModelRegistryStore,
+    model_versions,
 ):
-    first_version, second_version = _create_model_versions(store)
+    first_version, second_version = model_versions
 
     store.set_registered_model_alias(MODEL_NAME, "candidate", str(second_version.version))
 
@@ -102,8 +108,11 @@ def test_stored_alias_lifecycle_is_reflected_on_models_and_versions(
     assert missing_alias_error.value.error_code == "INVALID_PARAMETER_VALUE"
 
 
-def test_deleting_alias_target_removes_alias(store: MongoDBModelRegistryStore):
-    _, second_version = _create_model_versions(store)
+def test_deleting_alias_target_removes_alias(
+    store: MongoDBModelRegistryStore,
+    model_versions,
+):
+    _, second_version = model_versions
     store.set_registered_model_alias(MODEL_NAME, "candidate", second_version.version)
 
     store.delete_model_version(MODEL_NAME, second_version.version)
@@ -128,8 +137,9 @@ def test_alias_operations_validate_targets(store: MongoDBModelRegistryStore):
 
 def test_deleting_registered_model_makes_its_aliases_unresolvable(
     store: MongoDBModelRegistryStore,
+    model_versions,
 ):
-    _, second_version = _create_model_versions(store)
+    _, second_version = model_versions
     store.set_registered_model_alias(MODEL_NAME, "candidate", second_version.version)
 
     store.delete_registered_model(MODEL_NAME)

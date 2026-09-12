@@ -1,19 +1,9 @@
 """MLflow client smoke test for the MongoDB model-registry plugin."""
 
-import threading
-
 from mlflow import MlflowClient
 
 PROMPT_NAME = "mongodb-client-functional-prompt"
 PROMPT_TEMPLATE = "Summarize {{document}} in three sentences."
-
-
-def _wait_for_prompt_linking_threads() -> None:
-    for thread in threading.enumerate():
-        if thread.name.startswith("link_prompt_to_experiment_thread"):
-            thread.join(timeout=5)
-            if thread.is_alive():
-                raise TimeoutError(f"Thread {thread.name} did not complete within 5 seconds")
 
 
 def test_mlflow_client_prompt_lifecycle(
@@ -29,8 +19,6 @@ def test_mlflow_client_prompt_lifecycle(
         commit_message="Initial version",
         tags={"owner": "platform"},
     )
-    _wait_for_prompt_linking_threads()
-
     assert created.name == PROMPT_NAME
     assert created.version == 1
     assert created.template == PROMPT_TEMPLATE

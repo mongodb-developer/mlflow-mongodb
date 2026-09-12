@@ -7,10 +7,6 @@ from mlflow.exceptions import MlflowException
 from mlflow_mongodb import MongoDBModelRegistryStore
 
 
-def _assert_error_code(exc_info, expected_code):
-    assert exc_info.value.error_code == expected_code
-
-
 def _latest_versions_by_stage(versions):
     return {version.current_stage: version.version for version in versions}
 
@@ -54,7 +50,7 @@ def test_registered_model_create_get_and_update_contract(
 
     with pytest.raises(MlflowException, match="already exists") as duplicate_error:
         store.create_registered_model(model.name)
-    _assert_error_code(duplicate_error, "RESOURCE_ALREADY_EXISTS")
+    assert duplicate_error.value.error_code == "RESOURCE_ALREADY_EXISTS"
 
     other_model = store.create_registered_model(f"{model.name}-other")
     assert other_model.name == f"{model.name}-other"
@@ -65,7 +61,7 @@ def test_registered_model_create_get_and_update_contract(
             match="Missing value for required parameter 'name'",
         ) as invalid_name_error:
             store.create_registered_model(invalid_name)
-        _assert_error_code(invalid_name_error, "INVALID_PARAMETER_VALUE")
+        assert invalid_name_error.value.error_code == "INVALID_PARAMETER_VALUE"
 
 
 def test_rename_registered_model_preserves_versions_and_rejects_conflicts(
@@ -95,12 +91,12 @@ def test_rename_registered_model_preserves_versions_and_rejects_conflicts(
 
     with pytest.raises(MlflowException, match="Registered Model.*not found") as old_name_error:
         store.get_registered_model(original_name)
-    _assert_error_code(old_name_error, "RESOURCE_DOES_NOT_EXIST")
+    assert old_name_error.value.error_code == "RESOURCE_DOES_NOT_EXIST"
 
     store.create_registered_model(original_name)
     with pytest.raises(MlflowException, match="already exists") as conflict_error:
         store.rename_registered_model(new_name, original_name)
-    _assert_error_code(conflict_error, "RESOURCE_ALREADY_EXISTS")
+        assert conflict_error.value.error_code == "RESOURCE_ALREADY_EXISTS"
 
     for invalid_name in (None, ""):
         with pytest.raises(
@@ -108,7 +104,7 @@ def test_rename_registered_model_preserves_versions_and_rejects_conflicts(
             match="Missing value for required parameter 'new_name'",
         ) as invalid_name_error:
             store.rename_registered_model(original_name, invalid_name)
-        _assert_error_code(invalid_name_error, "INVALID_PARAMETER_VALUE")
+        assert invalid_name_error.value.error_code == "INVALID_PARAMETER_VALUE"
 
 
 def test_delete_registered_model_removes_versions_and_is_not_idempotent(
@@ -129,7 +125,7 @@ def test_delete_registered_model_removes_versions_and_is_not_idempotent(
     for operation in operations:
         with pytest.raises(MlflowException, match="not found") as missing_error:
             operation()
-        _assert_error_code(missing_error, "RESOURCE_DOES_NOT_EXIST")
+        assert missing_error.value.error_code == "RESOURCE_DOES_NOT_EXIST"
 
 
 def test_get_latest_versions_selects_each_stage_and_falls_back_after_deletion(
@@ -217,7 +213,7 @@ def test_registered_model_tags_replace_delete_and_remain_isolated(
             second_name,
             RegisteredModelTag("longTagKey", "a" * 100_001),
         )
-    _assert_error_code(long_tag_error, "INVALID_PARAMETER_VALUE")
+    assert long_tag_error.value.error_code == "INVALID_PARAMETER_VALUE"
 
     with pytest.raises(
         MlflowException,
@@ -227,14 +223,14 @@ def test_registered_model_tags_replace_delete_and_remain_isolated(
             second_name,
             RegisteredModelTag(key=None, value=""),
         )
-    _assert_error_code(invalid_tag_error, "INVALID_PARAMETER_VALUE")
+    assert invalid_tag_error.value.error_code == "INVALID_PARAMETER_VALUE"
 
     with pytest.raises(
         MlflowException,
         match="Missing value for required parameter 'key'",
     ) as invalid_key_error:
         store.delete_registered_model_tag(second_name, None)
-    _assert_error_code(invalid_key_error, "INVALID_PARAMETER_VALUE")
+    assert invalid_key_error.value.error_code == "INVALID_PARAMETER_VALUE"
 
     for operation in (
         lambda: store.set_registered_model_tag(None, RegisteredModelTag("key", "value")),
@@ -245,7 +241,7 @@ def test_registered_model_tags_replace_delete_and_remain_isolated(
             match="Missing value for required parameter 'name'",
         ) as invalid_name_error:
             operation()
-        _assert_error_code(invalid_name_error, "INVALID_PARAMETER_VALUE")
+        assert invalid_name_error.value.error_code == "INVALID_PARAMETER_VALUE"
 
     store.delete_registered_model(first_name)
     for operation in (
@@ -257,4 +253,4 @@ def test_registered_model_tags_replace_delete_and_remain_isolated(
     ):
         with pytest.raises(MlflowException, match="Registered Model.*not found") as missing_error:
             operation()
-        _assert_error_code(missing_error, "RESOURCE_DOES_NOT_EXIST")
+        assert missing_error.value.error_code == "RESOURCE_DOES_NOT_EXIST"
