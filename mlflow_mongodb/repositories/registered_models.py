@@ -61,7 +61,6 @@ class RegisteredModelNotFoundError(Exception):
 class RegisteredModelRepository:
     """Store registered-model documents in MongoDB."""
 
-    COLLECTION_NAME = MongoDBSettings.registered_models_collection_name
     UNIQUE_NAME_INDEX = "registered_models_name_unique"
     TAGS_INDEX = "registered_models_tags_key_value"
 

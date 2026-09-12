@@ -134,9 +134,17 @@ class MongoDBModelRegistryStore(AbstractStore):
     def _tracking_client(self):
         return MlflowClient(tracking_uri=self.tracking_uri)
 
-    @classmethod
+    def _to_mlflow_registered_model_details(
+        self,
+        details: RegisteredModelDetails,
+    ) -> RegisteredModel:
+        return self._to_mlflow_registered_model(
+            details.registered_model,
+            details.latest_versions,
+        )
+
     def _to_mlflow_registered_model(
-        cls,
+        self,
         record: RegisteredModelRecord,
         latest_version_records: tuple[ModelVersionRecord, ...] = (),
     ) -> RegisteredModel:
@@ -146,22 +154,12 @@ class MongoDBModelRegistryStore(AbstractStore):
             last_updated_timestamp=record.last_updated_timestamp,
             description=record.description,
             latest_versions=[
-                cls._to_mlflow_model_version(version_record, record)
+                self._to_mlflow_model_version(version_record, record)
                 for version_record in latest_version_records
             ],
             tags=[RegisteredModelTag(tag.key, tag.value) for tag in record.tags],
             aliases=[RegisteredModelAlias(alias.alias, alias.version) for alias in record.aliases],
             deployment_job_id=record.deployment_job_id,
-        )
-
-    @classmethod
-    def _to_mlflow_registered_model_details(
-        cls,
-        details: RegisteredModelDetails,
-    ) -> RegisteredModel:
-        return cls._to_mlflow_registered_model(
-            details.registered_model,
-            details.latest_versions,
         )
 
     @staticmethod
@@ -267,6 +265,12 @@ class MongoDBModelRegistryStore(AbstractStore):
             if field_type != "attribute":
                 raise MlflowException.invalid_parameter_value(
                     f"Invalid order_by entity: {field_type}"
+                )
+            if key not in {"name", "last_updated_timestamp"}:
+                raise MlflowException(
+                    f"Invalid order by key '{key}' specified. Valid keys are "
+                    "{'name', 'last_updated_timestamp'}",
+                    error_code=INVALID_PARAMETER_VALUE,
                 )
             if key in observed_fields:
                 raise MlflowException.invalid_parameter_value(

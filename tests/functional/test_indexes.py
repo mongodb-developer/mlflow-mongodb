@@ -21,7 +21,7 @@ def _application_indexes(store, collection_name):
 def test_registered_model_repository_indexes(mongodb_store: MongoDBModelRegistryStore):
     assert _application_indexes(
         mongodb_store,
-        RegisteredModelRepository.COLLECTION_NAME,
+        mongodb_store._settings.registered_models_collection_name,
     ) == {
         RegisteredModelRepository.UNIQUE_NAME_INDEX: {
             "key": [("name", 1)],
@@ -37,7 +37,7 @@ def test_registered_model_repository_indexes(mongodb_store: MongoDBModelRegistry
 def test_model_version_repository_indexes(mongodb_store: MongoDBModelRegistryStore):
     assert _application_indexes(
         mongodb_store,
-        ModelVersionRepository.COLLECTION_NAME,
+        mongodb_store._settings.model_versions_collection_name,
     ) == {
         ModelVersionRepository.UNIQUE_VERSION_INDEX: {
             "key": [("registered_model_id", 1), ("version", 1)],

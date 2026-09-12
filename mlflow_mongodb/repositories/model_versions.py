@@ -69,7 +69,6 @@ class ModelVersionNotFoundError(Exception):
 class ModelVersionRepository:
     """Read and write model-version documents in MongoDB."""
 
-    COLLECTION_NAME = MongoDBSettings.model_versions_collection_name
     UNIQUE_VERSION_INDEX = "model_versions_registered_model_id_version_unique"
     LATEST_VERSION_INDEX = "model_versions_registered_model_stage_version"
     TAGS_INDEX = "model_versions_tags_key_value"
