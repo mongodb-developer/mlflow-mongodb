@@ -1,5 +1,6 @@
 """Functional tests for the prompt API against a real MongoDB database."""
 
+import mlflow
 import pytest
 from mlflow.entities.model_registry import ModelVersionTag, RegisteredModelTag
 from mlflow.exceptions import MlflowException
@@ -11,6 +12,7 @@ PROMPT_NAME = "mongodb-functional-prompt"
 PROMPT_DESCRIPTION = "Prompt persisted by the MongoDB functional suite"
 PROMPT_TEMPLATE_V1 = "Answer {{question}} using the supplied context."
 PROMPT_TEMPLATE_V2 = "Answer {{question}} concisely using the supplied context."
+SUPPORTS_PROMPT_VERSION_SEARCH = not mlflow.__version__.startswith("3.1.")
 
 
 def test_prompt_metadata_lifecycle(store: MongoDBModelRegistryStore):
@@ -185,6 +187,10 @@ def test_model_searches_exclude_prompts_unless_prompt_filter_is_explicit(
     ]
 
 
+@pytest.mark.skipif(
+    not SUPPORTS_PROMPT_VERSION_SEARCH,
+    reason="MLflow 3.1 does not implement search_prompt_versions for OSS registries",
+)
 def test_search_prompt_versions_orders_paginates_and_validates_prompt_type(
     store: MongoDBModelRegistryStore,
 ):
