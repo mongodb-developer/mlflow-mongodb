@@ -11,11 +11,6 @@ line-length = 100
 target-version = "py310"
 required-version = "0.16.0"
 force-exclude = true
-extend-include = ["*.ipynb"]
-
-[tool.ruff.format]
-preview = true
-docstring-code-format = true
 
 [tool.ruff.lint]
 preview = true
@@ -41,6 +36,7 @@ select = [
   "UP",          # pyupgrade
   "YTT",         # flake8-2020
   "EXE",         # flake8-executable
+  "TID",         # flake8-tidy-imports
 ]
 ignore = [
   "function-call-in-default-argument",  # Function calls in default arguments
@@ -49,28 +45,11 @@ ignore = [
   "PLR",                      # Design related pylint codes
   "raw-string-in-exception",  # Exception must not use a string literal, assign to variable first
   "f-string-in-exception",    # Exception must not use an f-string literal, assign to variable first
-  "unused-method-argument",   # Unused method argument:
   "assert",                   # Use of `assert` detected
-  "mutable-class-default",    # Mutable class attributes should be annotated with `typing.ClassVar`
-  "redefined-loop-name",      # `for` loop variable `value` overwritten by assignment target
 ]
-
-[tool.ruff.lint.flake8-pytest-style]
-mark-parentheses = false
-fixture-parentheses = false
-raises-require-match-for = ["*"]
-warns-require-match-for = ["*"]
-
-[tool.ruff.lint.flake8-tidy-imports]
-ban-relative-imports = "all"
 
 [tool.ruff.lint.isort]
 known-first-party = ["mlflow_mongodb"]
-
-[tool.ruff.lint.flake8-tidy-imports.banned-api]
-"pkg_resources".msg = "Do not use pkg_resources. Use importlib.resources or importlib.metadata instead."
-"entrypoints".msg = "Do not use entrypoints. Use importlib.metadata.entry_points instead."
-"pip".msg = "Importing pip can cause undesired side effects."
 
 [tool.ruff.lint.per-file-ignores]
 "mlflow_mongodb/model_registry_store.py" = ["import-private-name"]

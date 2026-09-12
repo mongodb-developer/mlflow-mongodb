@@ -286,9 +286,11 @@ class MongoDBModelRegistryStore(AbstractStore):
         observed_fields = set()
         for order_by_clause in order_by or []:
             if order_by_clause == "timestamp" or order_by_clause.startswith("timestamp "):
-                order_by_clause = order_by_clause.replace("timestamp", "last_updated_timestamp", 1)
+                clause = order_by_clause.replace("timestamp", "last_updated_timestamp", 1)
+            else:
+                clause = order_by_clause
             field_type, key, ascending = (
-                SearchModelUtils.parse_order_by_for_search_registered_models(order_by_clause)
+                SearchModelUtils.parse_order_by_for_search_registered_models(clause)
             )
             if field_type != "attribute":
                 raise MlflowException.invalid_parameter_value(
@@ -769,7 +771,7 @@ class MongoDBModelRegistryStore(AbstractStore):
         tags=None,
         run_link=None,
         description=None,
-        local_model_path=None,
+        local_model_path=None,  # ruff: ignore[unused-method-argument]
         model_id=None,
     ):
         """
