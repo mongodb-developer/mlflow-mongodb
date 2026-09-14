@@ -570,6 +570,12 @@ class RegisteredModelRepository:
         *,
         stages: Sequence[str] | None = None,
     ) -> dict[str, Any]:
+        """Build a pipeline stage that adds the latest model versions to each registered model.
+
+        Returns:
+            A MongoDB aggregation stage that populates ``latest_versions``.
+        """
+
         version_match = (
             {"current_stage": {"$in": list(stages)}}
             if stages is not None
