@@ -90,4 +90,22 @@ jobs:
           print('PyMongo', pymongo.__version__)"
 
       - name: Run unit and functional tests
+        if: matrix.python_version == '3.10'
         run: python -m pytest tests/unit tests/functional
+
+      - name: Run unit and functional tests with coverage
+        if: matrix.python_version == '3.14'
+        run: >-
+          python -m pytest tests/unit tests/functional
+          --cov=mlflow_mongodb
+          --cov-report=term-missing
+          --cov-report=html
+
+      - name: Upload HTML coverage report
+        if: always() && matrix.python_version == '3.14'
+        uses: actions/upload-artifact@v7
+        with:
+          name: html-coverage-report
+          path: htmlcov/
+          if-no-files-found: warn
+          retention-days: 14
