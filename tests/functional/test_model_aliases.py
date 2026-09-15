@@ -2,6 +2,11 @@
 
 import pytest
 from mlflow.exceptions import MlflowException
+from mlflow.protos.databricks_pb2 import (
+    INVALID_PARAMETER_VALUE,
+    RESOURCE_DOES_NOT_EXIST,
+    ErrorCode,
+)
 from mlflow.utils import validation as mlflow_validation
 
 from mlflow_mongodb import MongoDBModelRegistryStore
@@ -56,6 +61,17 @@ def test_latest_alias_raises_when_model_has_no_versions(store: MongoDBModelRegis
 
 
 @pytest.mark.skipif(
+    not SUPPORTS_LATEST_ALIAS_LOOKUP,
+    reason="MLflow before 3.3 rejects the reserved latest alias during basic validation",
+)
+def test_latest_alias_raises_when_model_does_not_exist(store: MongoDBModelRegistryStore):
+    with pytest.raises(MlflowException, match="Registered Model.*not found") as missing_error:
+        store.get_model_version_by_alias(f"{MODEL_NAME}-missing", "latest")
+
+    assert missing_error.value.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST)
+
+
+@pytest.mark.skipif(
     SUPPORTS_LATEST_ALIAS_LOOKUP,
     reason="MLflow 3.3 and newer support latest as a virtual lookup alias",
 )
@@ -105,7 +121,7 @@ def test_stored_alias_lifecycle_is_reflected_on_models_and_versions(
         match="alias candidate not found",
     ) as missing_alias_error:
         store.get_model_version_by_alias(MODEL_NAME, "candidate")
-    assert missing_alias_error.value.error_code == "INVALID_PARAMETER_VALUE"
+    assert missing_alias_error.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
 
 
 def test_deleting_alias_target_removes_alias(
@@ -127,12 +143,12 @@ def test_alias_operations_validate_targets(store: MongoDBModelRegistryStore):
 
     with pytest.raises(MlflowException, match="Model Version") as missing_version_error:
         store.set_registered_model_alias(MODEL_NAME, "candidate", 99)
-    assert missing_version_error.value.error_code == "RESOURCE_DOES_NOT_EXIST"
+    assert missing_version_error.value.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST)
 
     store.delete_registered_model(MODEL_NAME)
     with pytest.raises(MlflowException, match="Registered Model") as missing_model_error:
         store.delete_registered_model_alias(MODEL_NAME, "candidate")
-    assert missing_model_error.value.error_code == "RESOURCE_DOES_NOT_EXIST"
+    assert missing_model_error.value.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST)
 
 
 def test_deleting_registered_model_makes_its_aliases_unresolvable(
@@ -146,4 +162,4 @@ def test_deleting_registered_model_makes_its_aliases_unresolvable(
 
     with pytest.raises(MlflowException, match="Registered Model.*not found") as missing_error:
         store.get_model_version_by_alias(MODEL_NAME, "candidate")
-    assert missing_error.value.error_code == "RESOURCE_DOES_NOT_EXIST"
+    assert missing_error.value.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST)

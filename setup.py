@@ -26,6 +26,7 @@ setup(
             "check-jsonschema==0.37.4",
             "pre-commit==4.6.1",
             "pytest>=8.0.0",
+            "pytest-cov",
             "ruff==0.16.0",
         ],
     },

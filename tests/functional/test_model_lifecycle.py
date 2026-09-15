@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from mlflow.entities.model_registry import ModelVersionTag, RegisteredModelTag
 from mlflow.exceptions import MlflowException
+from mlflow.protos.databricks_pb2 import RESOURCE_DOES_NOT_EXIST, ErrorCode
 
 from mlflow_mongodb import MongoDBModelRegistryStore
 
@@ -30,7 +31,7 @@ def test_registered_model_and_version_lifecycle(store: MongoDBModelRegistryStore
     assert renamed.name == RENAMED_MODEL_NAME
     with pytest.raises(MlflowException, match="Registered Model.*not found") as old_name_error:
         store.get_registered_model(MODEL_NAME)
-    assert old_name_error.value.error_code == "RESOURCE_DOES_NOT_EXIST"
+    assert old_name_error.value.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST)
 
     store.set_registered_model_tag(
         RENAMED_MODEL_NAME,
@@ -104,7 +105,7 @@ def test_registered_model_and_version_lifecycle(store: MongoDBModelRegistryStore
     store.delete_model_version(RENAMED_MODEL_NAME, version_two.version)
     with pytest.raises(MlflowException, match="Model Version.*not found") as deleted_version_error:
         store.get_model_version(RENAMED_MODEL_NAME, version_two.version)
-    assert deleted_version_error.value.error_code == "RESOURCE_DOES_NOT_EXIST"
+    assert deleted_version_error.value.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST)
     assert store.get_registered_model(RENAMED_MODEL_NAME).aliases == {}
 
     registered_model = store._registered_model_repository.find_by_name(RENAMED_MODEL_NAME)
@@ -113,7 +114,7 @@ def test_registered_model_and_version_lifecycle(store: MongoDBModelRegistryStore
 
     with pytest.raises(MlflowException, match="Registered Model.*not found") as deleted_model_error:
         store.get_registered_model(RENAMED_MODEL_NAME)
-    assert deleted_model_error.value.error_code == "RESOURCE_DOES_NOT_EXIST"
+    assert deleted_model_error.value.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST)
     assert (
         store._database[store._settings.model_versions_collection_name].count_documents(
             {"registered_model_id": registered_model.model_id}
