@@ -11,7 +11,7 @@ setup(
     description="MongoDB model registry store plugin for MLflow",
     long_description=(ROOT / "README.md").read_text(encoding="utf-8"),
     long_description_content_type="text/markdown",
-    url="https://github.com/WaVEV/mlflow-mongodb",
+    url="https://github.com/mongodb-developer/mlflow-mongodb",
     packages=find_packages(exclude=("tests", "tests.*")),
     python_requires=">=3.10",
     install_requires=[
