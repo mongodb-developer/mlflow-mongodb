@@ -12,13 +12,13 @@ that will run the MLflow server. If you use SSH, make sure your SSH key is confi
 GitHub:
 
 ```bash
-python -m pip install "git+ssh://git@github.com/mongodb-developer/mlflow-mongodb.git"
+python -m pip install "git+ssh://git@github.com/mongodb-developer/mlflow-mongodb.git@mvp-dev"
 ```
 
 If SSH is not configured, use HTTPS instead:
 
 ```bash
-python -m pip install "git+https://github.com/mongodb-developer/mlflow-mongodb.git"
+python -m pip install "git+https://github.com/mongodb-developer/mlflow-mongodb.git@mvp-dev"
 ```
 
 Registry URIs using either `mongodb://` or `mongodb+srv://` are routed to this backend.
@@ -71,7 +71,7 @@ The following guides provide additional context for using this plugin:
 For development, clone the repository and install it in editable mode:
 
 ```bash
-git clone https://github.com/mongodb-developer/mlflow-mongodb.git
+git clone -b mvp-dev https://github.com/mongodb-developer/mlflow-mongodb.git
 cd mlflow-mongodb
 
 python -m venv .venv
