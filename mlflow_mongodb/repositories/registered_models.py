@@ -127,12 +127,14 @@ class RegisteredModelRepository:
         *,
         model_id: ObjectId,
         last_updated_timestamp: int,
+        session: ClientSession | None = None,
     ) -> int:
         """Allocate the next model-version number.
 
         Args:
             model_id: MongoDB identifier of the registered model.
             last_updated_timestamp: Timestamp to store for the update.
+            session: Optional MongoDB client session.
 
         Returns:
             The newly allocated model-version number.
@@ -149,6 +151,7 @@ class RegisteredModelRepository:
             },
             projection={"version_counter": True},
             return_document=ReturnDocument.AFTER,
+            session=session,
         )
         if document is None:
             raise RegisteredModelNotFoundError(str(model_id))

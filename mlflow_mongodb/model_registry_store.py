@@ -108,21 +108,21 @@ class MongoDBModelRegistryStore(AbstractStore):
 
         try:
             return MongoClient(self.store_uri)
-        except ConfigurationError as exc:
+        except ConfigurationError:
             raise MlflowException(
-                f"Invalid MongoDB registry URI: {exc}",
+                "Invalid MongoDB registry URI.",
                 error_code=INVALID_PARAMETER_VALUE,
-            ) from exc
+            ) from None
 
     @cached_property
     def _database(self):
         try:
             return self._mongo_client.get_default_database()
-        except ConfigurationError as exc:
+        except ConfigurationError:
             raise MlflowException(
                 "The MongoDB registry URI must include a database name.",
                 error_code=INVALID_PARAMETER_VALUE,
-            ) from exc
+            ) from None
 
     @cached_property
     def _registered_model_repository(self):
@@ -232,11 +232,10 @@ class MongoDBModelRegistryStore(AbstractStore):
             parsed_model_uri = _parse_model_uri(source)
             try:
                 storage_location, run_id = self._resolve_models_uri(parsed_model_uri, run_id)
-            except Exception as exc:
+            except Exception:
                 raise MlflowException(
-                    f"Unable to fetch model from model URI source artifact location '{source}'. "
-                    f"Error: {exc}"
-                ) from exc
+                    "Unable to resolve the model source.",
+                ) from None
 
         if not run_id and model_id:
             model = self._tracking_client.get_logged_model(model_id)
@@ -959,7 +958,7 @@ class MongoDBModelRegistryStore(AbstractStore):
 
     def delete_model_version(self, name, version):
         """
-        Delete a model version.
+        Soft delete a model version.
 
         Args:
             name: Registered model name.

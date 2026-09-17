@@ -496,7 +496,7 @@ def test_resolve_model_version_source_wraps_resolution_error(store, monkeypatch)
 
     with pytest.raises(
         MlflowException,
-        match="Unable to fetch model from model URI source artifact location",
+        match="Unable to resolve the model source",
     ) as exc_info:
         store._resolve_model_version_source("models:/fraud-detector/7", None, None)
 
