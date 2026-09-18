@@ -1,5 +1,6 @@
 """Persistence operations for registered models."""
 
+import logging
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -23,6 +24,8 @@ from mlflow_mongodb.repositories.types import (
     RegisteredModelRecord,
 )
 from mlflow_mongodb.settings import MongoDBSettings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -117,6 +120,7 @@ class RegisteredModelRepository:
         try:
             result = self._collection.insert_one(document)
         except DuplicateKeyError as exc:
+            logger.error("Unable to create registered model: %s", exc)
             raise RegisteredModelAlreadyExistsError(name) from exc
 
         document["_id"] = result.inserted_id
@@ -266,6 +270,7 @@ class RegisteredModelRepository:
                 return_document=ReturnDocument.AFTER,
             )
         except DuplicateKeyError as exc:
+            logger.error("Unable to rename registered model: %s", exc)
             raise RegisteredModelAlreadyExistsError(new_name) from exc
 
         if document is None:

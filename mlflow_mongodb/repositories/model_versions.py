@@ -1,5 +1,6 @@
 """Persistence operations for model versions."""
 
+import logging
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -26,6 +27,8 @@ from mlflow_mongodb.repositories.types import (
     RegisteredModelRecord,
 )
 from mlflow_mongodb.settings import MongoDBSettings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -158,6 +161,7 @@ class ModelVersionRepository:
         try:
             result = self._collection.insert_one(document)
         except DuplicateKeyError as exc:
+            logger.error("Unable to create model version: %s", exc)
             raise ModelVersionAlreadyExistsError(f"{registered_model_id}:{version}") from exc
 
         document["_id"] = result.inserted_id
