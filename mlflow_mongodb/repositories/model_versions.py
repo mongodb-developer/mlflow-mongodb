@@ -13,7 +13,6 @@ from mlflow.entities.model_registry.model_version_stages import (
 )
 from mlflow.prompt.constants import IS_PROMPT_TAG_KEY
 from pymongo import ASCENDING, DESCENDING, ReturnDocument
-from pymongo.client_session import ClientSession
 from pymongo.database import Database
 from pymongo.errors import DuplicateKeyError
 
@@ -216,7 +215,6 @@ class ModelVersionRepository:
         version: int,
         stage: str,
         last_updated_timestamp: int,
-        session: ClientSession | None = None,
     ) -> ModelVersionRecord:
         """Transition a non-deleted model version to a new stage.
 
@@ -225,7 +223,6 @@ class ModelVersionRepository:
             version: Model-version number.
             stage: New model-version stage.
             last_updated_timestamp: Timestamp to store for the update.
-            session: Optional MongoDB client session.
 
         Returns:
             The updated :class:`ModelVersionRecord`.
@@ -247,7 +244,6 @@ class ModelVersionRepository:
                 }
             },
             return_document=ReturnDocument.AFTER,
-            session=session,
         )
         if document is None:
             raise ModelVersionNotFoundError(f"{registered_model_id}:{version}")
@@ -261,7 +257,6 @@ class ModelVersionRepository:
         version: int,
         stage: str,
         last_updated_timestamp: int,
-        session: ClientSession | None = None,
     ) -> None:
         """Archive other model versions currently in a stage.
 
@@ -270,7 +265,6 @@ class ModelVersionRepository:
             version: Model-version number to keep in the stage.
             stage: Stage whose other versions should be archived.
             last_updated_timestamp: Timestamp to store for the updates.
-            session: Optional MongoDB client session.
         """
         self._collection.update_many(
             {
@@ -284,7 +278,6 @@ class ModelVersionRepository:
                     "last_updated_timestamp": last_updated_timestamp,
                 }
             },
-            session=session,
         )
 
     def touch_all_for_registered_model(
@@ -292,7 +285,6 @@ class ModelVersionRepository:
         *,
         registered_model_id: ObjectId,
         last_updated_timestamp: int,
-        session: ClientSession | None = None,
     ) -> None:
         """Update the timestamp of every version for a registered model.
 
@@ -304,12 +296,10 @@ class ModelVersionRepository:
         Args:
             registered_model_id: MongoDB identifier of the registered model.
             last_updated_timestamp: Timestamp to store for the updates.
-            session: Optional MongoDB client session.
         """
         self._collection.update_many(
             {"registered_model_id": registered_model_id},
             {"$set": {"last_updated_timestamp": last_updated_timestamp}},
-            session=session,
         )
 
     def soft_delete(
@@ -318,7 +308,6 @@ class ModelVersionRepository:
         registered_model_id: ObjectId,
         version: int,
         last_updated_timestamp: int,
-        session: ClientSession | None = None,
     ) -> ModelVersionRecord:
         """Soft-delete and redact a model version.
 
@@ -332,7 +321,6 @@ class ModelVersionRepository:
             registered_model_id: MongoDB identifier of the registered model.
             version: Model-version number.
             last_updated_timestamp: Timestamp to store for the deletion.
-            session: Optional MongoDB client session.
 
         Returns:
             The redacted, soft-deleted :class:`ModelVersionRecord`.
@@ -360,7 +348,6 @@ class ModelVersionRepository:
                 }
             },
             return_document=ReturnDocument.AFTER,
-            session=session,
         )
         if document is None:
             raise ModelVersionNotFoundError(f"{registered_model_id}:{version}")
@@ -371,21 +358,16 @@ class ModelVersionRepository:
         self,
         *,
         registered_model_id: ObjectId,
-        session: ClientSession | None = None,
     ) -> int:
         """Permanently delete every model version owned by a registered model.
 
         Args:
             registered_model_id: MongoDB identifier of the registered model.
-            session: Optional MongoDB client session.
 
         Returns:
             The number of deleted model-version documents.
         """
-        result = self._collection.delete_many(
-            {"registered_model_id": registered_model_id},
-            session=session,
-        )
+        result = self._collection.delete_many({"registered_model_id": registered_model_id})
         return result.deleted_count
 
     def set_tag(

@@ -10,7 +10,6 @@ from bson import ObjectId
 from mlflow.entities.model_registry.model_version_stages import STAGE_DELETED_INTERNAL
 from mlflow.prompt.constants import IS_PROMPT_TAG_KEY
 from pymongo import ASCENDING, DESCENDING, ReturnDocument
-from pymongo.client_session import ClientSession
 from pymongo.database import Database
 from pymongo.errors import DuplicateKeyError
 
@@ -131,14 +130,12 @@ class RegisteredModelRepository:
         *,
         model_id: ObjectId,
         last_updated_timestamp: int,
-        session: ClientSession | None = None,
     ) -> int:
         """Allocate the next model-version number.
 
         Args:
             model_id: MongoDB identifier of the registered model.
             last_updated_timestamp: Timestamp to store for the update.
-            session: Optional MongoDB client session.
 
         Returns:
             The newly allocated model-version number.
@@ -155,7 +152,6 @@ class RegisteredModelRepository:
             },
             projection={"version_counter": True},
             return_document=ReturnDocument.AFTER,
-            session=session,
         )
         if document is None:
             raise RegisteredModelNotFoundError(str(model_id))
@@ -208,14 +204,12 @@ class RegisteredModelRepository:
         *,
         model_id: ObjectId,
         last_updated_timestamp: int,
-        session: ClientSession | None = None,
     ) -> RegisteredModelRecord:
         """Update only a registered model's last-updated timestamp.
 
         Args:
             model_id: MongoDB identifier of the registered model.
             last_updated_timestamp: Timestamp to store for the update.
-            session: Optional MongoDB client session.
 
         Returns:
             The updated :class:`RegisteredModelRecord`.
@@ -228,7 +222,6 @@ class RegisteredModelRepository:
             {"_id": model_id},
             {"$set": {"last_updated_timestamp": last_updated_timestamp}},
             return_document=ReturnDocument.AFTER,
-            session=session,
         )
         if document is None:
             raise RegisteredModelNotFoundError(str(model_id))
@@ -281,20 +274,17 @@ class RegisteredModelRepository:
     def find_by_name(
         self,
         name: str,
-        *,
-        session: ClientSession | None = None,
     ) -> RegisteredModelRecord | None:
         """Find a registered model by name.
 
         Args:
             name: Registered model name.
-            session: Optional MongoDB client session.
 
         Returns:
             The matching :class:`RegisteredModelRecord`, or ``None`` if no
             registered model has the specified name.
         """
-        document = self._collection.find_one({"name": name}, session=session)
+        document = self._collection.find_one({"name": name})
         return RegisteredModelRecord.from_document(document) if document is not None else None
 
     def find_by_name_with_latest_versions(
@@ -302,7 +292,6 @@ class RegisteredModelRepository:
         name: str,
         *,
         stages: Sequence[str] | None = None,
-        session: ClientSession | None = None,
     ) -> RegisteredModelDetails | None:
         """Find a registered model and its latest versions by name.
 
@@ -310,7 +299,6 @@ class RegisteredModelRepository:
             name: Registered model name.
             stages: Optional model-version stages to include when selecting
                 latest versions.
-            session: Optional MongoDB client session.
 
         Returns:
             The registered model and its latest matching
@@ -323,7 +311,6 @@ class RegisteredModelRepository:
                 {"$limit": 1},
                 self._latest_versions_lookup_stage(stages=stages),
             ],
-            session=session,
         )
         document = next(documents, None)
         return self._to_details(document) if document is not None else None
@@ -331,14 +318,11 @@ class RegisteredModelRepository:
     def find_latest_version_by_name(
         self,
         name: str,
-        *,
-        session: ClientSession | None = None,
     ) -> RegisteredModelDetails | None:
         """Find a registered model and its latest version by name.
 
         Args:
             name: Registered model name.
-            session: Optional MongoDB client session.
 
         Returns:
             The registered model and its latest :class:`ModelVersionRecord`,
@@ -350,7 +334,6 @@ class RegisteredModelRepository:
                 {"$limit": 1},
                 self._latest_version_lookup_stage(),
             ],
-            session=session,
         )
         document = next(documents, None)
         return self._to_details(document) if document is not None else None
@@ -358,14 +341,11 @@ class RegisteredModelRepository:
     def delete(
         self,
         name: str,
-        *,
-        session: ClientSession | None = None,
     ) -> RegisteredModelRecord:
         """Delete a registered model by name.
 
         Args:
             name: Registered model name.
-            session: Optional MongoDB client session.
 
         Returns:
             The deleted :class:`RegisteredModelRecord`.
@@ -374,7 +354,7 @@ class RegisteredModelRepository:
             RegisteredModelNotFoundError: If the registered model does not
                 exist.
         """
-        document = self._collection.find_one_and_delete({"name": name}, session=session)
+        document = self._collection.find_one_and_delete({"name": name})
         if document is None:
             raise RegisteredModelNotFoundError(name)
 
@@ -504,7 +484,6 @@ class RegisteredModelRepository:
         model_id: ObjectId,
         version: int,
         last_updated_timestamp: int,
-        session: ClientSession | None = None,
     ) -> RegisteredModelRecord:
         """Delete aliases for a model version and update the model timestamp.
 
@@ -512,7 +491,6 @@ class RegisteredModelRepository:
             model_id: MongoDB identifier of the registered model.
             version: Model-version number whose aliases should be deleted.
             last_updated_timestamp: Timestamp to store for the update.
-            session: Optional MongoDB client session.
 
         Returns:
             The updated :class:`RegisteredModelRecord`.
@@ -528,7 +506,6 @@ class RegisteredModelRepository:
                 "$set": {"last_updated_timestamp": last_updated_timestamp},
             },
             return_document=ReturnDocument.AFTER,
-            session=session,
         )
         if document is None:
             raise RegisteredModelNotFoundError(str(model_id))
