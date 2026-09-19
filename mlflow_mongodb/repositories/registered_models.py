@@ -13,7 +13,7 @@ from pymongo import ASCENDING, DESCENDING, ReturnDocument
 from pymongo.database import Database
 from pymongo.errors import DuplicateKeyError
 
-from mlflow_mongodb.repositories.helpers import (
+from mlflow_mongodb.repositories._helpers import (
     build_remove_array_element_update,
     build_replace_array_element_pipeline,
 )

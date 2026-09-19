@@ -1,4 +1,4 @@
-"""Shared helpers for MongoDB repositories."""
+"""Internal MongoDB update builders for repository documents."""
 
 from collections.abc import Mapping
 from typing import Any
@@ -11,12 +11,12 @@ def build_replace_array_element_pipeline(
     key: str,
     element: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
-    """Build a pipeline that replaces an array element identified by a key.
+    """Build a pipeline that replaces array elements matching a key.
 
-    The pipeline treats a missing or null array as empty, removes every
-    existing element whose ``key_field`` matches ``key``, and appends the
-    supplied element. ``$literal`` keeps caller-provided values as data
-    rather than aggregation expressions.
+    The pipeline treats a missing or null array as empty, removes all existing
+    elements whose ``key_field`` equals ``key``, and appends ``element``.
+    Caller-provided values are wrapped with ``$literal`` so they are treated
+    as data rather than aggregation expressions.
     """
     return [
         {
@@ -51,5 +51,5 @@ def build_remove_array_element_update(
     key_field: str,
     key: str,
 ) -> dict[str, Any]:
-    """Build a MongoDB update that removes array elements by a key."""
+    """Build a MongoDB ``$pull`` update that removes matching array elements."""
     return {"$pull": {array_field: {key_field: key}}}
