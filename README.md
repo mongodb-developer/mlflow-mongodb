@@ -1,6 +1,6 @@
 # MongoDB Backend for MLflow Registered Models
 
-> [!WARNING]
+> [WARNING]
 > This project is under active development and has not reached a stable release. APIs, storage
 > formats, and configuration may change at any time without notice. **It is not intended for
 > production use.** See [LICENSE](LICENSE) for the full disclaimer of warranties.
@@ -12,21 +12,10 @@ store.
 ## Installation
 
 Python 3.10 or newer, MLflow 3.1 or newer, and a MongoDB deployment are required.
-For a quick start, install the plugin directly from GitHub into the same Python environment
-that will run the MLflow server. If you use SSH, make sure your SSH key is configured with
-GitHub:
 
 ```bash
-python -m pip install "git+ssh://git@github.com/mongodb-developer/mlflow-mongodb.git"
+python -m pip install "mlflow-mongodb>=0.1.0.dev0"
 ```
-
-If SSH is not configured, use HTTPS instead:
-
-```bash
-python -m pip install "git+https://github.com/mongodb-developer/mlflow-mongodb.git"
-```
-
-Registry URIs using either `mongodb://` or `mongodb+srv://` are routed to this backend.
 
 ## Running MLflow
 
