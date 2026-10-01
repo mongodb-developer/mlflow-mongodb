@@ -52,6 +52,7 @@ from mlflow.utils.validation import (
     _validate_tag_name,
 )
 from pymongo import MongoClient
+from pymongo.driver_info import DriverInfo
 from pymongo.errors import ConfigurationError
 
 from mlflow_mongodb.infrastructure.settings import MongoDBSettings
@@ -114,7 +115,11 @@ class MongoDBModelRegistryStore(AbstractStore):
             )
 
         try:
-            return MongoClient(self.store_uri)
+            from mlflow_mongodb import __version__
+
+            return MongoClient(
+                self.store_uri, driver=DriverInfo(name="mlflow", version=__version__)
+            )
         except ConfigurationError as error:
             logger.error("Unable to create MongoDB client: %s", error)
             raise MlflowException(

@@ -5,8 +5,21 @@ from unittest.mock import MagicMock, call
 import pytest
 from mlflow.exceptions import MlflowException
 
-from mlflow_mongodb import MongoDBModelRegistryStore
+from mlflow_mongodb import MongoDBModelRegistryStore, __version__
 from mlflow_mongodb.infrastructure.settings import MongoDBSettings
+
+
+def test_mongo_client_reports_driver_name_and_version(monkeypatch):
+    mock_mongo_client = MagicMock()
+    monkeypatch.setattr("mlflow_mongodb.model_registry.store.MongoClient", mock_mongo_client)
+    store = MongoDBModelRegistryStore("mongodb://localhost:27017/mlflow")
+
+    store._mongo_client
+
+    (uri,), kwargs = mock_mongo_client.call_args
+    assert uri == "mongodb://localhost:27017/mlflow"
+    assert kwargs["driver"].name == "mlflow"
+    assert kwargs["driver"].version == __version__
 
 
 def test_mongo_client_requires_registry_uri():
