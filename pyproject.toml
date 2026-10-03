@@ -53,6 +53,7 @@ known-first-party = ["mlflow_mongodb"]
 
 [tool.ruff.lint.per-file-ignores]
 "mlflow_mongodb/model_registry/store.py" = ["import-private-name"]
+"mlflow_mongodb/tracking/store.py" = ["import-private-name"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
