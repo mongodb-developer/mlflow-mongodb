@@ -1,6 +1,5 @@
 """Persistence operations for model versions."""
 
-import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -19,6 +18,7 @@ from mlflow_mongodb.infrastructure.array_operations import (
     build_remove_array_element_update,
     build_replace_array_element_pipeline,
 )
+from mlflow_mongodb.infrastructure.repository_operations import repository_operation
 from mlflow_mongodb.infrastructure.search_filters import build_value_condition
 from mlflow_mongodb.infrastructure.settings import MongoDBSettings
 from mlflow_mongodb.model_registry.errors import (
@@ -30,8 +30,6 @@ from mlflow_mongodb.model_registry.types import (
     ModelVersionSearchResult,
     RegisteredModelRecord,
 )
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -74,27 +72,28 @@ class ModelVersionRepository:
 
     def __init__(self, database: Database, settings: MongoDBSettings | None = None):
         self._settings = settings or MongoDBSettings()
-        self._collection = database[self._settings.model_versions_collection_name]
-        self._registered_models_collection = database[
-            self._settings.registered_models_collection_name
-        ]
-        self._collection.create_index(
-            [("registered_model_id", ASCENDING), ("version", ASCENDING)],
-            unique=True,
-            name=self.UNIQUE_VERSION_INDEX,
-        )
-        self._collection.create_index(
-            [
-                ("registered_model_id", ASCENDING),
-                ("current_stage", ASCENDING),
-                ("version", DESCENDING),
-            ],
-            name=self.LATEST_VERSION_INDEX,
-        )
-        self._collection.create_index(
-            [("tags.key", ASCENDING), ("tags.value", ASCENDING)],
-            name=self.TAGS_INDEX,
-        )
+        with repository_operation("Unable to initialize repository."):
+            self._collection = database[self._settings.model_versions_collection_name]
+            self._registered_models_collection = database[
+                self._settings.registered_models_collection_name
+            ]
+            self._collection.create_index(
+                [("registered_model_id", ASCENDING), ("version", ASCENDING)],
+                unique=True,
+                name=self.UNIQUE_VERSION_INDEX,
+            )
+            self._collection.create_index(
+                [
+                    ("registered_model_id", ASCENDING),
+                    ("current_stage", ASCENDING),
+                    ("version", DESCENDING),
+                ],
+                name=self.LATEST_VERSION_INDEX,
+            )
+            self._collection.create_index(
+                [("tags.key", ASCENDING), ("tags.value", ASCENDING)],
+                name=self.TAGS_INDEX,
+            )
 
     def create(
         self,
@@ -153,11 +152,11 @@ class ModelVersionRepository:
             "model_id": model_id,
         }
 
-        try:
-            result = self._collection.insert_one(document)
-        except DuplicateKeyError as exc:
-            logger.error("Unable to create model version: %s", exc)
-            raise ModelVersionAlreadyExistsError(f"{registered_model_id}:{version}") from exc
+        with repository_operation("Unable to create."):
+            try:
+                result = self._collection.insert_one(document)
+            except DuplicateKeyError as exc:
+                raise ModelVersionAlreadyExistsError(f"{registered_model_id}:{version}") from exc
 
         document["_id"] = result.inserted_id
         return ModelVersionRecord.from_document(document)
@@ -185,20 +184,21 @@ class ModelVersionRepository:
             ModelVersionNotFoundError: If the model version does not exist or
                 has been soft-deleted.
         """
-        document = self._collection.find_one_and_update(
-            {
-                "registered_model_id": registered_model_id,
-                "version": version,
-                "current_stage": {"$ne": STAGE_DELETED_INTERNAL},
-            },
-            {
-                "$set": {
-                    "description": description,
-                    "last_updated_timestamp": last_updated_timestamp,
-                }
-            },
-            return_document=ReturnDocument.AFTER,
-        )
+        with repository_operation("Unable to update description."):
+            document = self._collection.find_one_and_update(
+                {
+                    "registered_model_id": registered_model_id,
+                    "version": version,
+                    "current_stage": {"$ne": STAGE_DELETED_INTERNAL},
+                },
+                {
+                    "$set": {
+                        "description": description,
+                        "last_updated_timestamp": last_updated_timestamp,
+                    }
+                },
+                return_document=ReturnDocument.AFTER,
+            )
         if document is None:
             raise ModelVersionNotFoundError(f"{registered_model_id}:{version}")
 
@@ -227,20 +227,21 @@ class ModelVersionRepository:
             ModelVersionNotFoundError: If the model version does not exist or
                 has been soft-deleted.
         """
-        document = self._collection.find_one_and_update(
-            {
-                "registered_model_id": registered_model_id,
-                "version": version,
-                "current_stage": {"$ne": STAGE_DELETED_INTERNAL},
-            },
-            {
-                "$set": {
-                    "current_stage": stage,
-                    "last_updated_timestamp": last_updated_timestamp,
-                }
-            },
-            return_document=ReturnDocument.AFTER,
-        )
+        with repository_operation("Unable to transition stage."):
+            document = self._collection.find_one_and_update(
+                {
+                    "registered_model_id": registered_model_id,
+                    "version": version,
+                    "current_stage": {"$ne": STAGE_DELETED_INTERNAL},
+                },
+                {
+                    "$set": {
+                        "current_stage": stage,
+                        "last_updated_timestamp": last_updated_timestamp,
+                    }
+                },
+                return_document=ReturnDocument.AFTER,
+            )
         if document is None:
             raise ModelVersionNotFoundError(f"{registered_model_id}:{version}")
 
@@ -262,19 +263,20 @@ class ModelVersionRepository:
             stage: Stage whose other versions should be archived.
             last_updated_timestamp: Timestamp to store for the updates.
         """
-        self._collection.update_many(
-            {
-                "registered_model_id": registered_model_id,
-                "version": {"$ne": version},
-                "current_stage": stage,
-            },
-            {
-                "$set": {
-                    "current_stage": STAGE_ARCHIVED,
-                    "last_updated_timestamp": last_updated_timestamp,
-                }
-            },
-        )
+        with repository_operation("Unable to archive other versions in stage."):
+            self._collection.update_many(
+                {
+                    "registered_model_id": registered_model_id,
+                    "version": {"$ne": version},
+                    "current_stage": stage,
+                },
+                {
+                    "$set": {
+                        "current_stage": STAGE_ARCHIVED,
+                        "last_updated_timestamp": last_updated_timestamp,
+                    }
+                },
+            )
 
     def touch_all_for_registered_model(
         self,
@@ -293,10 +295,11 @@ class ModelVersionRepository:
             registered_model_id: MongoDB identifier of the registered model.
             last_updated_timestamp: Timestamp to store for the updates.
         """
-        self._collection.update_many(
-            {"registered_model_id": registered_model_id},
-            {"$set": {"last_updated_timestamp": last_updated_timestamp}},
-        )
+        with repository_operation("Unable to touch all for registered model."):
+            self._collection.update_many(
+                {"registered_model_id": registered_model_id},
+                {"$set": {"last_updated_timestamp": last_updated_timestamp}},
+            )
 
     def soft_delete(
         self,
@@ -325,26 +328,27 @@ class ModelVersionRepository:
             ModelVersionNotFoundError: If the model version does not exist or
                 has already been soft-deleted.
         """
-        document = self._collection.find_one_and_update(
-            {
-                "registered_model_id": registered_model_id,
-                "version": version,
-                "current_stage": {"$ne": STAGE_DELETED_INTERNAL},
-            },
-            {
-                "$set": {
-                    "current_stage": STAGE_DELETED_INTERNAL,
-                    "last_updated_timestamp": last_updated_timestamp,
-                    "description": None,
-                    "user_id": None,
-                    "source": "REDACTED-SOURCE-PATH",
-                    "run_id": "REDACTED-RUN-ID",
-                    "run_link": "REDACTED-RUN-LINK",
-                    "status_message": None,
-                }
-            },
-            return_document=ReturnDocument.AFTER,
-        )
+        with repository_operation("Unable to soft delete."):
+            document = self._collection.find_one_and_update(
+                {
+                    "registered_model_id": registered_model_id,
+                    "version": version,
+                    "current_stage": {"$ne": STAGE_DELETED_INTERNAL},
+                },
+                {
+                    "$set": {
+                        "current_stage": STAGE_DELETED_INTERNAL,
+                        "last_updated_timestamp": last_updated_timestamp,
+                        "description": None,
+                        "user_id": None,
+                        "source": "REDACTED-SOURCE-PATH",
+                        "run_id": "REDACTED-RUN-ID",
+                        "run_link": "REDACTED-RUN-LINK",
+                        "status_message": None,
+                    }
+                },
+                return_document=ReturnDocument.AFTER,
+            )
         if document is None:
             raise ModelVersionNotFoundError(f"{registered_model_id}:{version}")
 
@@ -363,7 +367,8 @@ class ModelVersionRepository:
         Returns:
             The number of deleted model-version documents.
         """
-        result = self._collection.delete_many({"registered_model_id": registered_model_id})
+        with repository_operation("Unable to delete all for registered model."):
+            result = self._collection.delete_many({"registered_model_id": registered_model_id})
         return result.deleted_count
 
     def set_tag(
@@ -389,20 +394,22 @@ class ModelVersionRepository:
             ModelVersionNotFoundError: If the model version does not exist or
                 has been soft-deleted.
         """
-        document = self._collection.find_one_and_update(
-            {
-                "registered_model_id": registered_model_id,
-                "version": version,
-                "current_stage": {"$ne": STAGE_DELETED_INTERNAL},
-            },
-            build_replace_array_element_pipeline(
-                array_field="tags",
-                key_field="key",
-                key=key,
-                element={"key": key, "value": value},
-            ),
-            return_document=ReturnDocument.AFTER,
+        update = build_replace_array_element_pipeline(
+            array_field="tags",
+            key_field="key",
+            key=key,
+            element={"key": key, "value": value},
         )
+        with repository_operation("Unable to set tag."):
+            document = self._collection.find_one_and_update(
+                {
+                    "registered_model_id": registered_model_id,
+                    "version": version,
+                    "current_stage": {"$ne": STAGE_DELETED_INTERNAL},
+                },
+                update,
+                return_document=ReturnDocument.AFTER,
+            )
         if document is None:
             raise ModelVersionNotFoundError(f"{registered_model_id}:{version}")
 
@@ -429,19 +436,21 @@ class ModelVersionRepository:
             ModelVersionNotFoundError: If the model version does not exist or
                 has been soft-deleted.
         """
-        document = self._collection.find_one_and_update(
-            {
-                "registered_model_id": registered_model_id,
-                "version": version,
-                "current_stage": {"$ne": STAGE_DELETED_INTERNAL},
-            },
-            build_remove_array_element_update(
-                array_field="tags",
-                key_field="key",
-                key=key,
-            ),
-            return_document=ReturnDocument.AFTER,
+        update = build_remove_array_element_update(
+            array_field="tags",
+            key_field="key",
+            key=key,
         )
+        with repository_operation("Unable to delete tag."):
+            document = self._collection.find_one_and_update(
+                {
+                    "registered_model_id": registered_model_id,
+                    "version": version,
+                    "current_stage": {"$ne": STAGE_DELETED_INTERNAL},
+                },
+                update,
+                return_document=ReturnDocument.AFTER,
+            )
         if document is None:
             raise ModelVersionNotFoundError(f"{registered_model_id}:{version}")
 
@@ -463,13 +472,14 @@ class ModelVersionRepository:
             The matching :class:`ModelVersionRecord`, or ``None`` if the
             version does not exist or has been soft-deleted.
         """
-        document = self._collection.find_one(
-            {
-                "registered_model_id": registered_model_id,
-                "version": version,
-                "current_stage": {"$ne": STAGE_DELETED_INTERNAL},
-            }
-        )
+        with repository_operation("Unable to find by version."):
+            document = self._collection.find_one(
+                {
+                    "registered_model_id": registered_model_id,
+                    "version": version,
+                    "current_stage": {"$ne": STAGE_DELETED_INTERNAL},
+                }
+            )
         return ModelVersionRecord.from_document(document) if document is not None else None
 
     def exists_for_registered_model(
@@ -488,36 +498,38 @@ class ModelVersionRepository:
             ``True`` if the registered model exists and owns the specified
             non-deleted version; otherwise, ``False``.
         """
-        documents = self._registered_models_collection.aggregate(
-            [
-                {
-                    "$match": {"name": registered_model_name},
-                },
-                {"$limit": 1},
-                {
-                    "$lookup": {
-                        "from": self._settings.model_versions_collection_name,
-                        "localField": "_id",
-                        "foreignField": "registered_model_id",
-                        "pipeline": [
-                            {
-                                "$match": {
-                                    "version": version,
-                                    "current_stage": {"$ne": STAGE_DELETED_INTERNAL},
-                                }
-                            },
-                            {"$limit": 1},
-                            {"$project": {"_id": True}},
-                        ],
-                        "as": "matching_versions",
-                    }
-                },
-                {"$match": {"matching_versions.0": {"$exists": True}}},
-                {"$project": {"_id": True}},
-                {"$limit": 1},
-            ]
-        )
-        return next(documents, None) is not None
+        with repository_operation("Unable to check model-version existence."):
+            documents = self._registered_models_collection.aggregate(
+                [
+                    {
+                        "$match": {"name": registered_model_name},
+                    },
+                    {"$limit": 1},
+                    {
+                        "$lookup": {
+                            "from": self._settings.model_versions_collection_name,
+                            "localField": "_id",
+                            "foreignField": "registered_model_id",
+                            "pipeline": [
+                                {
+                                    "$match": {
+                                        "version": version,
+                                        "current_stage": {"$ne": STAGE_DELETED_INTERNAL},
+                                    }
+                                },
+                                {"$limit": 1},
+                                {"$project": {"_id": True}},
+                            ],
+                            "as": "matching_versions",
+                        }
+                    },
+                    {"$match": {"matching_versions.0": {"$exists": True}}},
+                    {"$project": {"_id": True}},
+                    {"$limit": 1},
+                ]
+            )
+            document = next(documents, None)
+        return document is not None
 
     def find_latest_by_stages(
         self,
@@ -536,20 +548,22 @@ class ModelVersionRepository:
             :class:`ModelVersionRecord` for each requested stage, ordered by
             version number descending.
         """
-        documents = self._collection.aggregate(
-            [
-                {
-                    "$match": {
-                        "registered_model_id": registered_model_id,
-                        "current_stage": {"$in": list(stages)},
-                    }
-                },
-                {"$sort": {"current_stage": ASCENDING, "version": DESCENDING}},
-                {"$group": {"_id": "$current_stage", "record": {"$first": "$$ROOT"}}},
-                {"$replaceRoot": {"newRoot": "$record"}},
-                {"$sort": {"version": DESCENDING}},
-            ]
-        )
+        with repository_operation("Unable to find latest by stages."):
+            documents = self._collection.aggregate(
+                [
+                    {
+                        "$match": {
+                            "registered_model_id": registered_model_id,
+                            "current_stage": {"$in": list(stages)},
+                        }
+                    },
+                    {"$sort": {"current_stage": ASCENDING, "version": DESCENDING}},
+                    {"$group": {"_id": "$current_stage", "record": {"$first": "$$ROOT"}}},
+                    {"$replaceRoot": {"newRoot": "$record"}},
+                    {"$sort": {"version": DESCENDING}},
+                ]
+            )
+            documents = list(documents)
         return tuple(ModelVersionRecord.from_document(document) for document in documents)
 
     def search(
@@ -644,7 +658,8 @@ class ModelVersionRepository:
         # Fetch one extra record to determine whether another page exists.
         pipeline.append({"$limit": max_results + 1})
 
-        documents = list(self._collection.aggregate(pipeline))
+        with repository_operation("Unable to search."):
+            documents = list(self._collection.aggregate(pipeline))
         has_more = len(documents) > max_results
         records = tuple(
             ModelVersionSearchResult(

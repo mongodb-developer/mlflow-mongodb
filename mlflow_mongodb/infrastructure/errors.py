@@ -3,6 +3,10 @@
 from collections.abc import Collection
 
 
+class RepositoryPersistenceError(Exception):
+    """Raised when a database operation cannot be completed."""
+
+
 class RepositoryUnsupportedFieldTypeError(Exception):
     """Raised when a filter targets an unsupported field type."""
 

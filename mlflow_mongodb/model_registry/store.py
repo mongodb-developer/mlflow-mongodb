@@ -66,6 +66,7 @@ from mlflow_mongodb.infrastructure.search_filters import (
     SearchFilterValidator,
 )
 from mlflow_mongodb.infrastructure.settings import MongoDBSettings
+from mlflow_mongodb.infrastructure.store_errors import handle_persistence_error
 from mlflow_mongodb.model_registry.errors import (
     ModelVersionAlreadyExistsError,
     ModelVersionNotFoundError,
@@ -147,10 +148,12 @@ class MongoDBModelRegistryStore(AbstractStore):
             ) from None
 
     @cached_property
+    @handle_persistence_error("Unable to initialize registered-model repository.", logger=logger)
     def _registered_model_repository(self):
         return RegisteredModelRepository(self._database, settings=self._settings)
 
     @cached_property
+    @handle_persistence_error("Unable to initialize model-version repository.", logger=logger)
     def _model_version_repository(self):
         return ModelVersionRepository(self._database, settings=self._settings)
 
@@ -469,6 +472,7 @@ class MongoDBModelRegistryStore(AbstractStore):
             parsed_order.append(ModelVersionOrder(key="version_number", ascending=False))
         return tuple(parsed_order)
 
+    @handle_persistence_error("Unable to create registered model.", logger=logger)
     def create_registered_model(self, name, tags=None, description=None, deployment_job_id=None):
         """
         Create a registered model.
@@ -490,6 +494,7 @@ class MongoDBModelRegistryStore(AbstractStore):
 
         creation_timestamp = get_current_time_millis()
         deployment_job_id = str(deployment_job_id) if deployment_job_id is not None else None
+        existing_tags = None
         try:
             record = self._registered_model_repository.create(
                 name=name,
@@ -498,11 +503,14 @@ class MongoDBModelRegistryStore(AbstractStore):
                 tags=tags_by_key,
                 deployment_job_id=deployment_job_id,
             )
-        except RegisteredModelAlreadyExistsError:
+        except RegisteredModelAlreadyExistsError as exc:
+            logger.error("Unable to create registered model: %s", exc)
             existing_record = self._registered_model_repository.find_by_name(name)
             existing_tags = (
                 {tag.key: tag.value for tag in existing_record.tags} if existing_record else {}
             )
+
+        if existing_tags is not None:
             handle_resource_already_exist_error(
                 name,
                 has_prompt_tag(existing_tags),
@@ -511,6 +519,7 @@ class MongoDBModelRegistryStore(AbstractStore):
 
         return self._to_mlflow_registered_model(record)
 
+    @handle_persistence_error("Unable to update registered model.", logger=logger)
     def update_registered_model(self, name, description, deployment_job_id=None):
         """
         Update a registered model's description and deployment job.
@@ -546,6 +555,7 @@ class MongoDBModelRegistryStore(AbstractStore):
         )
         return self._to_mlflow_registered_model(record, latest_version_records)
 
+    @handle_persistence_error("Unable to rename registered model.", logger=logger)
     def rename_registered_model(self, name, new_name):
         """
         Rename a registered model.
@@ -590,6 +600,7 @@ class MongoDBModelRegistryStore(AbstractStore):
         )
         return self._to_mlflow_registered_model(record, latest_version_records)
 
+    @handle_persistence_error("Unable to delete registered model.", logger=logger)
     def delete_registered_model(self, name):
         """
         Delete a registered model and its model versions.
@@ -614,6 +625,7 @@ class MongoDBModelRegistryStore(AbstractStore):
             registered_model_id=registered_model.model_id,
         )
 
+    @handle_persistence_error("Unable to search registered models.", logger=logger)
     def search_registered_models(
         self, filter_string=None, max_results=None, order_by=None, page_token=None
     ):
@@ -651,9 +663,11 @@ class MongoDBModelRegistryStore(AbstractStore):
                 error_code=INVALID_PARAMETER_VALUE,
             )
 
+        filters = self._parse_registered_model_filters(filter_string)
+        parsed_order_by = self._parse_registered_model_order(order_by)
         page = self._registered_model_repository.search(
-            filters=self._parse_registered_model_filters(filter_string),
-            order_by=self._parse_registered_model_order(order_by),
+            filters=filters,
+            order_by=parsed_order_by,
             offset=offset,
             max_results=max_results,
         )
@@ -665,6 +679,7 @@ class MongoDBModelRegistryStore(AbstractStore):
             next_page_token,
         )
 
+    @handle_persistence_error("Unable to get registered model.", logger=logger)
     def get_registered_model(self, name):
         """
         Retrieve a registered model by name.
@@ -686,6 +701,7 @@ class MongoDBModelRegistryStore(AbstractStore):
 
         return self._to_mlflow_registered_model_details(details)
 
+    @handle_persistence_error("Unable to get latest versions.", logger=logger)
     def get_latest_versions(self, name, stages=None):
         """
         Retrieve the latest model versions for the requested stages.
@@ -718,6 +734,7 @@ class MongoDBModelRegistryStore(AbstractStore):
             for record in details.latest_versions
         ]
 
+    @handle_persistence_error("Unable to set registered model tag.", logger=logger)
     def set_registered_model_tag(self, name, tag):
         """
         Set a tag on a registered model.
@@ -742,6 +759,7 @@ class MongoDBModelRegistryStore(AbstractStore):
                 error_code=RESOURCE_DOES_NOT_EXIST,
             ) from None
 
+    @handle_persistence_error("Unable to delete registered model tag.", logger=logger)
     def delete_registered_model_tag(self, name, key):
         """
         Delete a tag from a registered model.
@@ -762,6 +780,7 @@ class MongoDBModelRegistryStore(AbstractStore):
                 error_code=RESOURCE_DOES_NOT_EXIST,
             ) from None
 
+    @handle_persistence_error("Unable to set registered model alias.", logger=logger)
     def set_registered_model_alias(self, name, alias, version):
         """
         Assign an alias to a registered model version.
@@ -802,6 +821,7 @@ class MongoDBModelRegistryStore(AbstractStore):
                 error_code=RESOURCE_DOES_NOT_EXIST,
             ) from None
 
+    @handle_persistence_error("Unable to delete registered model alias.", logger=logger)
     def delete_registered_model_alias(self, name, alias):
         """
         Delete an alias from a registered model.
@@ -825,6 +845,7 @@ class MongoDBModelRegistryStore(AbstractStore):
                 error_code=RESOURCE_DOES_NOT_EXIST,
             ) from None
 
+    @handle_persistence_error("Unable to create model version.", logger=logger)
     def create_model_version(
         self,
         name,
@@ -912,6 +933,7 @@ class MongoDBModelRegistryStore(AbstractStore):
 
         return self._to_mlflow_model_version(record, registered_model)
 
+    @handle_persistence_error("Unable to update model version.", logger=logger)
     def update_model_version(self, name, version, description):
         """
         Update a model version's description.
@@ -951,6 +973,7 @@ class MongoDBModelRegistryStore(AbstractStore):
 
         return self._to_mlflow_model_version(record, registered_model)
 
+    @handle_persistence_error("Unable to transition model version stage.", logger=logger)
     def transition_model_version_stage(self, name, version, stage, archive_existing_versions):
         """
         Update a model version stage.
@@ -1024,6 +1047,7 @@ class MongoDBModelRegistryStore(AbstractStore):
 
         return self._to_mlflow_model_version(record, registered_model)
 
+    @handle_persistence_error("Unable to delete model version.", logger=logger)
     def delete_model_version(self, name, version):
         """
         Soft delete a model version.
@@ -1070,6 +1094,7 @@ class MongoDBModelRegistryStore(AbstractStore):
                 error_code=RESOURCE_DOES_NOT_EXIST,
             ) from None
 
+    @handle_persistence_error("Unable to get model version.", logger=logger)
     def get_model_version(self, name, version):
         """
         Retrieve a model version by registered-model name and version.
@@ -1102,6 +1127,7 @@ class MongoDBModelRegistryStore(AbstractStore):
 
         return self._to_mlflow_model_version(model_version, registered_model)
 
+    @handle_persistence_error("Unable to get model version download uri.", logger=logger)
     def get_model_version_download_uri(self, name, version):
         """
         Retrieve the artifact URI for a model version.
@@ -1134,6 +1160,7 @@ class MongoDBModelRegistryStore(AbstractStore):
 
         return model_version.storage_location or model_version.source
 
+    @handle_persistence_error("Unable to search model versions.", logger=logger)
     def search_model_versions(
         self, filter_string=None, max_results=None, order_by=None, page_token=None
     ):
@@ -1172,9 +1199,10 @@ class MongoDBModelRegistryStore(AbstractStore):
             )
 
         filters, exclude_prompts = self._parse_model_version_filters(filter_string)
+        parsed_order_by = self._parse_model_version_order(order_by)
         page = self._model_version_repository.search(
             filters=filters,
-            order_by=self._parse_model_version_order(order_by),
+            order_by=parsed_order_by,
             exclude_prompts=exclude_prompts,
             offset=offset,
             max_results=max_results,
@@ -1193,6 +1221,7 @@ class MongoDBModelRegistryStore(AbstractStore):
             next_page_token,
         )
 
+    @handle_persistence_error("Unable to set model version tag.", logger=logger)
     def set_model_version_tag(self, name, version, tag):
         """
         Set a tag on a model version.
@@ -1228,6 +1257,7 @@ class MongoDBModelRegistryStore(AbstractStore):
                 error_code=RESOURCE_DOES_NOT_EXIST,
             ) from None
 
+    @handle_persistence_error("Unable to delete model version tag.", logger=logger)
     def delete_model_version_tag(self, name, version, key):
         """
         Delete a tag from a model version.
@@ -1262,6 +1292,7 @@ class MongoDBModelRegistryStore(AbstractStore):
                 error_code=RESOURCE_DOES_NOT_EXIST,
             ) from None
 
+    @handle_persistence_error("Unable to get model version by alias.", logger=logger)
     def get_model_version_by_alias(self, name, alias):
         """
         Retrieve the model version targeted by an alias.

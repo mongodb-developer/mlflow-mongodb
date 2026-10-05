@@ -1,6 +1,5 @@
 """Persistence operations for registered models."""
 
-import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -16,6 +15,7 @@ from mlflow_mongodb.infrastructure.array_operations import (
     build_remove_array_element_update,
     build_replace_array_element_pipeline,
 )
+from mlflow_mongodb.infrastructure.repository_operations import repository_operation
 from mlflow_mongodb.infrastructure.search_filters import build_value_condition
 from mlflow_mongodb.infrastructure.settings import MongoDBSettings
 from mlflow_mongodb.model_registry.errors import (
@@ -27,8 +27,6 @@ from mlflow_mongodb.model_registry.types import (
     RegisteredModelDetails,
     RegisteredModelRecord,
 )
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -65,16 +63,17 @@ class RegisteredModelRepository:
 
     def __init__(self, database: Database, settings: MongoDBSettings | None = None):
         self._settings = settings or MongoDBSettings()
-        self._collection = database[self._settings.registered_models_collection_name]
-        self._collection.create_index(
-            [("name", ASCENDING)],
-            unique=True,
-            name=self.UNIQUE_NAME_INDEX,
-        )
-        self._collection.create_index(
-            [("tags.key", ASCENDING), ("tags.value", ASCENDING)],
-            name=self.TAGS_INDEX,
-        )
+        with repository_operation("Unable to initialize repository."):
+            self._collection = database[self._settings.registered_models_collection_name]
+            self._collection.create_index(
+                [("name", ASCENDING)],
+                unique=True,
+                name=self.UNIQUE_NAME_INDEX,
+            )
+            self._collection.create_index(
+                [("tags.key", ASCENDING), ("tags.value", ASCENDING)],
+                name=self.TAGS_INDEX,
+            )
 
     def create(
         self,
@@ -112,11 +111,11 @@ class RegisteredModelRepository:
             "version_counter": 0,
         }
 
-        try:
-            result = self._collection.insert_one(document)
-        except DuplicateKeyError as exc:
-            logger.error("Unable to create registered model: %s", exc)
-            raise RegisteredModelAlreadyExistsError(name) from exc
+        with repository_operation("Unable to create."):
+            try:
+                result = self._collection.insert_one(document)
+            except DuplicateKeyError as exc:
+                raise RegisteredModelAlreadyExistsError(name) from exc
 
         document["_id"] = result.inserted_id
         return RegisteredModelRecord.from_document(document)
@@ -140,15 +139,16 @@ class RegisteredModelRepository:
             RegisteredModelNotFoundError: If the registered model does not
                 exist.
         """
-        document = self._collection.find_one_and_update(
-            {"_id": model_id},
-            {
-                "$inc": {"version_counter": 1},
-                "$set": {"last_updated_timestamp": last_updated_timestamp},
-            },
-            projection={"version_counter": True},
-            return_document=ReturnDocument.AFTER,
-        )
+        with repository_operation("Unable to allocate next version."):
+            document = self._collection.find_one_and_update(
+                {"_id": model_id},
+                {
+                    "$inc": {"version_counter": 1},
+                    "$set": {"last_updated_timestamp": last_updated_timestamp},
+                },
+                projection={"version_counter": True},
+                return_document=ReturnDocument.AFTER,
+            )
         if document is None:
             raise RegisteredModelNotFoundError(str(model_id))
 
@@ -185,11 +185,12 @@ class RegisteredModelRepository:
         if deployment_job_id is not None:
             fields_to_update["deployment_job_id"] = deployment_job_id
 
-        document = self._collection.find_one_and_update(
-            {"name": name},
-            {"$set": fields_to_update},
-            return_document=ReturnDocument.AFTER,
-        )
+        with repository_operation("Unable to update."):
+            document = self._collection.find_one_and_update(
+                {"name": name},
+                {"$set": fields_to_update},
+                return_document=ReturnDocument.AFTER,
+            )
         if document is None:
             raise RegisteredModelNotFoundError(name)
 
@@ -214,11 +215,12 @@ class RegisteredModelRepository:
             RegisteredModelNotFoundError: If the registered model does not
                 exist.
         """
-        document = self._collection.find_one_and_update(
-            {"_id": model_id},
-            {"$set": {"last_updated_timestamp": last_updated_timestamp}},
-            return_document=ReturnDocument.AFTER,
-        )
+        with repository_operation("Unable to touch."):
+            document = self._collection.find_one_and_update(
+                {"_id": model_id},
+                {"$set": {"last_updated_timestamp": last_updated_timestamp}},
+                return_document=ReturnDocument.AFTER,
+            )
         if document is None:
             raise RegisteredModelNotFoundError(str(model_id))
 
@@ -247,20 +249,20 @@ class RegisteredModelRepository:
             RegisteredModelNotFoundError: If the registered model does not
                 exist.
         """
-        try:
-            document = self._collection.find_one_and_update(
-                {"name": name},
-                {
-                    "$set": {
-                        "name": new_name,
-                        "last_updated_timestamp": last_updated_timestamp,
-                    }
-                },
-                return_document=ReturnDocument.AFTER,
-            )
-        except DuplicateKeyError as exc:
-            logger.error("Unable to rename registered model: %s", exc)
-            raise RegisteredModelAlreadyExistsError(new_name) from exc
+        with repository_operation("Unable to rename."):
+            try:
+                document = self._collection.find_one_and_update(
+                    {"name": name},
+                    {
+                        "$set": {
+                            "name": new_name,
+                            "last_updated_timestamp": last_updated_timestamp,
+                        }
+                    },
+                    return_document=ReturnDocument.AFTER,
+                )
+            except DuplicateKeyError as exc:
+                raise RegisteredModelAlreadyExistsError(new_name) from exc
 
         if document is None:
             raise RegisteredModelNotFoundError(name)
@@ -280,7 +282,8 @@ class RegisteredModelRepository:
             The matching :class:`RegisteredModelRecord`, or ``None`` if no
             registered model has the specified name.
         """
-        document = self._collection.find_one({"name": name})
+        with repository_operation("Unable to find by name."):
+            document = self._collection.find_one({"name": name})
         return RegisteredModelRecord.from_document(document) if document is not None else None
 
     def find_by_name_with_latest_versions(
@@ -301,14 +304,15 @@ class RegisteredModelRepository:
             :class:`ModelVersionRecord` objects, or ``None`` if no registered
             model has the specified name.
         """
-        documents = self._collection.aggregate(
-            [
-                {"$match": {"name": name}},
-                {"$limit": 1},
-                self._latest_versions_lookup_stage(stages=stages),
-            ],
-        )
-        document = next(documents, None)
+        with repository_operation("Unable to find by name with latest versions."):
+            documents = self._collection.aggregate(
+                [
+                    {"$match": {"name": name}},
+                    {"$limit": 1},
+                    self._latest_versions_lookup_stage(stages=stages),
+                ],
+            )
+            document = next(documents, None)
         return self._to_details(document) if document is not None else None
 
     def find_latest_version_by_name(
@@ -324,14 +328,15 @@ class RegisteredModelRepository:
             The registered model and its latest :class:`ModelVersionRecord`,
             or ``None`` if no registered model has the specified name.
         """
-        documents = self._collection.aggregate(
-            [
-                {"$match": {"name": name}},
-                {"$limit": 1},
-                self._latest_version_lookup_stage(),
-            ],
-        )
-        document = next(documents, None)
+        with repository_operation("Unable to find latest version by name."):
+            documents = self._collection.aggregate(
+                [
+                    {"$match": {"name": name}},
+                    {"$limit": 1},
+                    self._latest_version_lookup_stage(),
+                ],
+            )
+            document = next(documents, None)
         return self._to_details(document) if document is not None else None
 
     def delete(
@@ -350,7 +355,8 @@ class RegisteredModelRepository:
             RegisteredModelNotFoundError: If the registered model does not
                 exist.
         """
-        document = self._collection.find_one_and_delete({"name": name})
+        with repository_operation("Unable to delete."):
+            document = self._collection.find_one_and_delete({"name": name})
         if document is None:
             raise RegisteredModelNotFoundError(name)
 
@@ -371,16 +377,18 @@ class RegisteredModelRepository:
             RegisteredModelNotFoundError: If the registered model does not
                 exist.
         """
-        document = self._collection.find_one_and_update(
-            {"name": name},
-            build_replace_array_element_pipeline(
-                array_field="tags",
-                key_field="key",
-                key=key,
-                element={"key": key, "value": value},
-            ),
-            return_document=ReturnDocument.AFTER,
+        update = build_replace_array_element_pipeline(
+            array_field="tags",
+            key_field="key",
+            key=key,
+            element={"key": key, "value": value},
         )
+        with repository_operation("Unable to set tag."):
+            document = self._collection.find_one_and_update(
+                {"name": name},
+                update,
+                return_document=ReturnDocument.AFTER,
+            )
         if document is None:
             raise RegisteredModelNotFoundError(name)
 
@@ -400,15 +408,17 @@ class RegisteredModelRepository:
             RegisteredModelNotFoundError: If the registered model does not
                 exist.
         """
-        document = self._collection.find_one_and_update(
-            {"name": name},
-            build_remove_array_element_update(
-                array_field="tags",
-                key_field="key",
-                key=key,
-            ),
-            return_document=ReturnDocument.AFTER,
+        update = build_remove_array_element_update(
+            array_field="tags",
+            key_field="key",
+            key=key,
         )
+        with repository_operation("Unable to delete tag."):
+            document = self._collection.find_one_and_update(
+                {"name": name},
+                update,
+                return_document=ReturnDocument.AFTER,
+            )
         if document is None:
             raise RegisteredModelNotFoundError(name)
 
@@ -435,16 +445,18 @@ class RegisteredModelRepository:
             RegisteredModelNotFoundError: If the registered model does not
                 exist.
         """
-        document = self._collection.find_one_and_update(
-            {"name": name},
-            build_replace_array_element_pipeline(
-                array_field="aliases",
-                key_field="alias",
-                key=alias,
-                element={"alias": alias, "version": version},
-            ),
-            return_document=ReturnDocument.AFTER,
+        update = build_replace_array_element_pipeline(
+            array_field="aliases",
+            key_field="alias",
+            key=alias,
+            element={"alias": alias, "version": version},
         )
+        with repository_operation("Unable to set alias by name."):
+            document = self._collection.find_one_and_update(
+                {"name": name},
+                update,
+                return_document=ReturnDocument.AFTER,
+            )
         if document is None:
             raise RegisteredModelNotFoundError(name)
 
@@ -464,11 +476,12 @@ class RegisteredModelRepository:
             RegisteredModelNotFoundError: If the registered model does not
                 exist.
         """
-        document = self._collection.find_one_and_update(
-            {"name": name},
-            {"$pull": {"aliases": {"alias": alias}}},
-            return_document=ReturnDocument.AFTER,
-        )
+        with repository_operation("Unable to delete alias by name."):
+            document = self._collection.find_one_and_update(
+                {"name": name},
+                {"$pull": {"aliases": {"alias": alias}}},
+                return_document=ReturnDocument.AFTER,
+            )
         if document is None:
             raise RegisteredModelNotFoundError(name)
 
@@ -495,14 +508,15 @@ class RegisteredModelRepository:
             RegisteredModelNotFoundError: If the registered model does not
                 exist.
         """
-        document = self._collection.find_one_and_update(
-            {"_id": model_id},
-            {
-                "$pull": {"aliases": {"version": version}},
-                "$set": {"last_updated_timestamp": last_updated_timestamp},
-            },
-            return_document=ReturnDocument.AFTER,
-        )
+        with repository_operation("Unable to delete aliases for version and touch."):
+            document = self._collection.find_one_and_update(
+                {"_id": model_id},
+                {
+                    "$pull": {"aliases": {"version": version}},
+                    "$set": {"last_updated_timestamp": last_updated_timestamp},
+                },
+                return_document=ReturnDocument.AFTER,
+            )
         if document is None:
             raise RegisteredModelNotFoundError(str(model_id))
 
@@ -542,7 +556,8 @@ class RegisteredModelRepository:
                 self._latest_versions_lookup_stage(),
             ]
         )
-        documents = list(self._collection.aggregate(pipeline))
+        with repository_operation("Unable to search."):
+            documents = list(self._collection.aggregate(pipeline))
         records = tuple(self._to_details(document) for document in documents[:max_results])
         return RegisteredModelPage(records=records, has_more=len(documents) > max_results)
 
