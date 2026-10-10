@@ -14,13 +14,13 @@ def test_replace_pipeline_treats_expression_like_values_as_literal_data(array_fi
     element = {key_field: key, "v": {"$concat": ["$secret", "suffix"]}}
 
     pipeline = build_replace_array_element_pipeline(
-        array_field=array_field, key_field=key_field, key=key, element=element
+        array_field=array_field, key_field=key_field, element=element
     )
 
     filtered, appended = pipeline[0]["$set"][array_field]["$concatArrays"]
     assert filtered["$filter"]["input"] == {"$ifNull": [f"${array_field}", []]}
     assert filtered["$filter"]["cond"] == {
-        "$ne": [f"$$stored_element.{key_field}", {"$literal": key}]
+        "$not": [{"$in": [f"$$stored.{key_field}", {"$literal": [key]}]}]
     }
     assert appended == {"$literal": [element]}
 
@@ -29,7 +29,7 @@ def test_replace_pipeline_copies_element_without_mutating_input():
     element = {"k": "team", "v": "platform"}
 
     pipeline = build_replace_array_element_pipeline(
-        array_field="tags", key_field="k", key="team", element=element
+        array_field="tags", key_field="k", element=element
     )
     element["v"] = "changed"
 

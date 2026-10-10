@@ -397,7 +397,6 @@ class ModelVersionRepository:
         update = build_replace_array_element_pipeline(
             array_field="tags",
             key_field="key",
-            key=key,
             element={"key": key, "value": value},
         )
         with repository_operation("Unable to set tag."):
