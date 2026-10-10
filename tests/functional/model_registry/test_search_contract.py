@@ -6,6 +6,7 @@ from mlflow.entities.model_registry import (
     ModelVersionTag,
     RegisteredModelTag,
 )
+from mlflow.utils.search_utils import SearchModelVersionUtils
 
 from mlflow_mongodb import MongoDBModelRegistryStore
 from mlflow_mongodb.model_registry.repositories import (
@@ -13,6 +14,10 @@ from mlflow_mongodb.model_registry.repositories import (
     ModelVersionOrder,
     RegisteredModelFilter,
     RegisteredModelOrder,
+)
+
+SUPPORTS_MODEL_NAME_LIST_FILTERS = "name" in getattr(
+    SearchModelVersionUtils, "LIST_SUPPORTED_KEYS", ()
 )
 
 
@@ -87,6 +92,32 @@ def test_search_model_versions_supports_portable_attribute_filters(
     assert _search_model_version_numbers(store, "source_path = 'A/D'") == {3, 4}
     assert _search_model_version_numbers(store, "source_path = 'A'") == set()
     assert _search_model_version_numbers(store, "source_path = ''") == set()
+
+
+@pytest.mark.skipif(
+    not SUPPORTS_MODEL_NAME_LIST_FILTERS,
+    reason="The installed MLflow parser does not support model-name list filters",
+)
+def test_search_model_versions_supports_name_list_filters(store: MongoDBModelRegistryStore):
+    first_name = "search-model-name-list-first"
+    second_name = "search-model-name-list-second"
+    excluded_name = "search-model-name-list-excluded"
+    for name in (first_name, second_name, excluded_name):
+        store.create_registered_model(name)
+
+    first_version = store.create_model_version(first_name, "models/first/1")
+    second_version = store.create_model_version(first_name, "models/first/2")
+    other_model_version = store.create_model_version(second_name, "models/second/1")
+    store.create_model_version(excluded_name, "models/excluded/1")
+
+    results = store.search_model_versions(f"name IN ('{first_name}', '{second_name}')")
+
+    assert {(version.name, version.version) for version in results} == {
+        (first_name, first_version.version),
+        (first_name, second_version.version),
+        (second_name, other_model_version.version),
+    }
+    assert store.search_model_versions("name IN ('missing-model')") == []
 
 
 def test_search_model_versions_attribute_inequality_excludes_null_and_missing_values(

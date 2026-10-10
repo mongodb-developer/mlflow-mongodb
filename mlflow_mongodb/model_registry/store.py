@@ -57,7 +57,9 @@ from pymongo.errors import ConfigurationError
 
 from mlflow_mongodb._version import __version__
 from mlflow_mongodb.infrastructure.errors import (
+    RepositoryAlreadyExistsError,
     RepositoryInvalidAttributeError,
+    RepositoryNotFoundError,
     RepositoryUnsupportedComparatorError,
     RepositoryUnsupportedFieldTypeError,
 )
@@ -67,12 +69,6 @@ from mlflow_mongodb.infrastructure.search_filters import (
 )
 from mlflow_mongodb.infrastructure.settings import MongoDBSettings
 from mlflow_mongodb.infrastructure.store_errors import handle_persistence_error
-from mlflow_mongodb.model_registry.errors import (
-    ModelVersionAlreadyExistsError,
-    ModelVersionNotFoundError,
-    RegisteredModelAlreadyExistsError,
-    RegisteredModelNotFoundError,
-)
 from mlflow_mongodb.model_registry.repositories import (
     ModelVersionFilter,
     ModelVersionOrder,
@@ -366,10 +362,12 @@ class MongoDBModelRegistryStore(AbstractStore):
             field_types=("attribute", "tag"),
             attribute_keys=SearchModelVersionUtils.VALID_SEARCH_ATTRIBUTE_KEYS,
             comparators={
+                # MLflow supports IN only for name and run_id, not other model-version attributes.
                 "attribute": SearchModelVersionUtils.VALID_STRING_ATTRIBUTE_COMPARATORS - {"IN"},
                 "tag": SearchModelVersionUtils.VALID_TAG_COMPARATORS,
             },
             field_comparators={
+                ("attribute", "name"): SearchModelVersionUtils.VALID_STRING_ATTRIBUTE_COMPARATORS,
                 ("attribute", "run_id"): SearchModelVersionUtils.VALID_STRING_ATTRIBUTE_COMPARATORS,
                 **{
                     ("attribute", key): SearchModelVersionUtils.VALID_NUMERIC_ATTRIBUTE_COMPARATORS
@@ -503,7 +501,7 @@ class MongoDBModelRegistryStore(AbstractStore):
                 tags=tags_by_key,
                 deployment_job_id=deployment_job_id,
             )
-        except RegisteredModelAlreadyExistsError as exc:
+        except RepositoryAlreadyExistsError as exc:
             logger.error("Unable to create registered model: %s", exc)
             existing_record = self._registered_model_repository.find_by_name(name)
             existing_tags = (
@@ -542,7 +540,7 @@ class MongoDBModelRegistryStore(AbstractStore):
                 description=description,
                 deployment_job_id=deployment_job_id,
             )
-        except RegisteredModelNotFoundError as exc:
+        except RepositoryNotFoundError as exc:
             logger.error("Unable to update registered model: %s", exc)
             raise MlflowException(
                 f"Registered Model with name={name} not found",
@@ -577,13 +575,13 @@ class MongoDBModelRegistryStore(AbstractStore):
                 new_name=new_name,
                 last_updated_timestamp=last_updated_timestamp,
             )
-        except RegisteredModelNotFoundError as exc:
+        except RepositoryNotFoundError as exc:
             logger.error("Unable to rename registered model: %s", exc)
             raise MlflowException(
                 f"Registered Model with name={name} not found",
                 error_code=RESOURCE_DOES_NOT_EXIST,
             ) from None
-        except RegisteredModelAlreadyExistsError as exc:
+        except RepositoryAlreadyExistsError as exc:
             logger.error("Unable to rename registered model: %s", exc)
             raise MlflowException(
                 f"Registered Model (name={new_name}) already exists.",
@@ -612,7 +610,7 @@ class MongoDBModelRegistryStore(AbstractStore):
 
         try:
             registered_model = self._registered_model_repository.delete(name)
-        except RegisteredModelNotFoundError as exc:
+        except RepositoryNotFoundError as exc:
             logger.error("Unable to delete registered model: %s", exc)
             raise MlflowException(
                 f"Registered Model with name={name} not found",
@@ -752,7 +750,7 @@ class MongoDBModelRegistryStore(AbstractStore):
                 key=tag.key,
                 value=tag.value,
             )
-        except RegisteredModelNotFoundError as exc:
+        except RepositoryNotFoundError as exc:
             logger.error("Unable to set registered-model tag: %s", exc)
             raise MlflowException(
                 f"Registered Model with name={name} not found",
@@ -773,7 +771,7 @@ class MongoDBModelRegistryStore(AbstractStore):
 
         try:
             self._registered_model_repository.delete_tag(name=name, key=key)
-        except RegisteredModelNotFoundError as exc:
+        except RepositoryNotFoundError as exc:
             logger.error("Unable to delete registered-model tag: %s", exc)
             raise MlflowException(
                 f"Registered Model with name={name} not found",
@@ -814,7 +812,7 @@ class MongoDBModelRegistryStore(AbstractStore):
                 alias=alias,
                 version=version,
             )
-        except RegisteredModelNotFoundError as exc:
+        except RepositoryNotFoundError as exc:
             logger.error("Unable to set registered-model alias: %s", exc)
             raise MlflowException(
                 f"Model Version (name={name}, version={version}) not found",
@@ -838,7 +836,7 @@ class MongoDBModelRegistryStore(AbstractStore):
                 name=name,
                 alias=alias,
             )
-        except RegisteredModelNotFoundError as exc:
+        except RepositoryNotFoundError as exc:
             logger.error("Unable to delete registered-model alias: %s", exc)
             raise MlflowException(
                 f"Registered Model with name={name} not found",
@@ -902,7 +900,7 @@ class MongoDBModelRegistryStore(AbstractStore):
                 model_id=registered_model.model_id,
                 last_updated_timestamp=creation_timestamp,
             )
-        except RegisteredModelNotFoundError as exc:
+        except RepositoryNotFoundError as exc:
             logger.error("Unable to allocate model-version number: %s", exc)
             raise MlflowException(
                 f"Registered Model with name={name} not found",
@@ -924,7 +922,7 @@ class MongoDBModelRegistryStore(AbstractStore):
                 tags=tags_by_key,
                 model_id=model_id,
             )
-        except ModelVersionAlreadyExistsError as exc:
+        except RepositoryAlreadyExistsError as exc:
             logger.error("Unable to create model version: %s", exc)
             raise MlflowException(
                 f"Model Version creation error (name={name}, version={version}): "
@@ -964,7 +962,7 @@ class MongoDBModelRegistryStore(AbstractStore):
                 description=description,
                 last_updated_timestamp=get_current_time_millis(),
             )
-        except ModelVersionNotFoundError as exc:
+        except RepositoryNotFoundError as exc:
             logger.error("Unable to update model version: %s", exc)
             raise MlflowException(
                 f"Model Version (name={name}, version={version}) not found",
@@ -1018,7 +1016,7 @@ class MongoDBModelRegistryStore(AbstractStore):
                 stage=canonical_stage,
                 last_updated_timestamp=last_updated_timestamp,
             )
-        except ModelVersionNotFoundError as exc:
+        except RepositoryNotFoundError as exc:
             logger.error("Unable to transition model-version stage: %s", exc)
             raise MlflowException(
                 f"Model Version (name={name}, version={version}) not found",
@@ -1038,7 +1036,7 @@ class MongoDBModelRegistryStore(AbstractStore):
                 model_id=registered_model.model_id,
                 last_updated_timestamp=last_updated_timestamp,
             )
-        except RegisteredModelNotFoundError as exc:
+        except RepositoryNotFoundError as exc:
             logger.error("Unable to update registered model after stage transition: %s", exc)
             raise MlflowException(
                 f"Model Version (name={name}, version={version}) not found",
@@ -1074,7 +1072,7 @@ class MongoDBModelRegistryStore(AbstractStore):
                 version=version,
                 last_updated_timestamp=last_updated_timestamp,
             )
-        except ModelVersionNotFoundError as exc:
+        except RepositoryNotFoundError as exc:
             logger.error("Unable to delete model version: %s", exc)
             raise MlflowException(
                 f"Model Version (name={name}, version={version}) not found",
@@ -1087,7 +1085,7 @@ class MongoDBModelRegistryStore(AbstractStore):
                 version=version,
                 last_updated_timestamp=last_updated_timestamp,
             )
-        except RegisteredModelNotFoundError as exc:
+        except RepositoryNotFoundError as exc:
             logger.error("Unable to update registered model after model-version deletion: %s", exc)
             raise MlflowException(
                 f"Model Version (name={name}, version={version}) not found",
@@ -1250,7 +1248,7 @@ class MongoDBModelRegistryStore(AbstractStore):
                 key=tag.key,
                 value=tag.value,
             )
-        except ModelVersionNotFoundError as exc:
+        except RepositoryNotFoundError as exc:
             logger.error("Unable to set model-version tag: %s", exc)
             raise MlflowException(
                 f"Model Version (name={name}, version={version}) not found",
@@ -1285,7 +1283,7 @@ class MongoDBModelRegistryStore(AbstractStore):
                 version=version,
                 key=key,
             )
-        except ModelVersionNotFoundError as exc:
+        except RepositoryNotFoundError as exc:
             logger.error("Unable to delete model-version tag: %s", exc)
             raise MlflowException(
                 f"Model Version (name={name}, version={version}) not found",

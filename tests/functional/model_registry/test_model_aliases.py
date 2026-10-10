@@ -10,7 +10,7 @@ from mlflow.protos.databricks_pb2 import (
 from mlflow.utils import validation as mlflow_validation
 
 from mlflow_mongodb import MongoDBModelRegistryStore
-from mlflow_mongodb.model_registry.errors import RegisteredModelNotFoundError
+from mlflow_mongodb.infrastructure.errors import RepositoryNotFoundError
 
 MODEL_NAME = "mongodb-functional-alias-model"
 SUPPORTS_LATEST_ALIAS_LOOKUP = hasattr(
@@ -146,7 +146,7 @@ def test_set_alias_by_name_rejects_deleted_registered_model(
     first_version, _ = model_versions
     store.delete_registered_model(MODEL_NAME)
 
-    with pytest.raises(RegisteredModelNotFoundError) as caught:
+    with pytest.raises(RepositoryNotFoundError) as caught:
         store._registered_model_repository.set_alias_by_name(
             name=MODEL_NAME,
             alias="candidate",
@@ -168,7 +168,7 @@ def test_delete_aliases_for_version_and_touch_rejects_deleted_registered_model(
     assert model is not None
     store.delete_registered_model(MODEL_NAME)
 
-    with pytest.raises(RegisteredModelNotFoundError) as caught:
+    with pytest.raises(RepositoryNotFoundError) as caught:
         repository.delete_aliases_for_version_and_touch(
             model_id=model.model_id,
             version=first_version.version,

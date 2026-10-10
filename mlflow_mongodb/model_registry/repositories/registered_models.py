@@ -15,13 +15,13 @@ from mlflow_mongodb.infrastructure.array_operations import (
     build_remove_array_element_update,
     build_replace_array_element_pipeline,
 )
+from mlflow_mongodb.infrastructure.errors import (
+    RepositoryAlreadyExistsError,
+    RepositoryNotFoundError,
+)
 from mlflow_mongodb.infrastructure.repository_operations import repository_operation
 from mlflow_mongodb.infrastructure.search_filters import build_value_condition
 from mlflow_mongodb.infrastructure.settings import MongoDBSettings
-from mlflow_mongodb.model_registry.errors import (
-    RegisteredModelAlreadyExistsError,
-    RegisteredModelNotFoundError,
-)
 from mlflow_mongodb.model_registry.types import (
     ModelVersionRecord,
     RegisteredModelDetails,
@@ -97,7 +97,7 @@ class RegisteredModelRepository:
             The created :class:`RegisteredModelRecord`.
 
         Raises:
-            RegisteredModelAlreadyExistsError: If a model with the same name
+            RepositoryAlreadyExistsError: If a model with the same name
                 already exists.
         """
         document: dict[str, Any] = {
@@ -115,7 +115,7 @@ class RegisteredModelRepository:
             try:
                 result = self._collection.insert_one(document)
             except DuplicateKeyError as exc:
-                raise RegisteredModelAlreadyExistsError(name) from exc
+                raise RepositoryAlreadyExistsError(name) from exc
 
         document["_id"] = result.inserted_id
         return RegisteredModelRecord.from_document(document)
@@ -136,7 +136,7 @@ class RegisteredModelRepository:
             The newly allocated model-version number.
 
         Raises:
-            RegisteredModelNotFoundError: If the registered model does not
+            RepositoryNotFoundError: If the registered model does not
                 exist.
         """
         with repository_operation("Unable to allocate next version."):
@@ -150,7 +150,7 @@ class RegisteredModelRepository:
                 return_document=ReturnDocument.AFTER,
             )
         if document is None:
-            raise RegisteredModelNotFoundError(str(model_id))
+            raise RepositoryNotFoundError(str(model_id))
 
         return document["version_counter"]
 
@@ -175,7 +175,7 @@ class RegisteredModelRepository:
             The updated :class:`RegisteredModelRecord`.
 
         Raises:
-            RegisteredModelNotFoundError: If the registered model does not
+            RepositoryNotFoundError: If the registered model does not
                 exist.
         """
         fields_to_update = {
@@ -192,7 +192,7 @@ class RegisteredModelRepository:
                 return_document=ReturnDocument.AFTER,
             )
         if document is None:
-            raise RegisteredModelNotFoundError(name)
+            raise RepositoryNotFoundError(name)
 
         return RegisteredModelRecord.from_document(document)
 
@@ -212,7 +212,7 @@ class RegisteredModelRepository:
             The updated :class:`RegisteredModelRecord`.
 
         Raises:
-            RegisteredModelNotFoundError: If the registered model does not
+            RepositoryNotFoundError: If the registered model does not
                 exist.
         """
         with repository_operation("Unable to touch."):
@@ -222,7 +222,7 @@ class RegisteredModelRepository:
                 return_document=ReturnDocument.AFTER,
             )
         if document is None:
-            raise RegisteredModelNotFoundError(str(model_id))
+            raise RepositoryNotFoundError(str(model_id))
 
         return RegisteredModelRecord.from_document(document)
 
@@ -244,9 +244,9 @@ class RegisteredModelRepository:
             The renamed :class:`RegisteredModelRecord`.
 
         Raises:
-            RegisteredModelAlreadyExistsError: If another model already has
+            RepositoryAlreadyExistsError: If another model already has
                 the new name.
-            RegisteredModelNotFoundError: If the registered model does not
+            RepositoryNotFoundError: If the registered model does not
                 exist.
         """
         with repository_operation("Unable to rename."):
@@ -262,10 +262,10 @@ class RegisteredModelRepository:
                     return_document=ReturnDocument.AFTER,
                 )
             except DuplicateKeyError as exc:
-                raise RegisteredModelAlreadyExistsError(new_name) from exc
+                raise RepositoryAlreadyExistsError(new_name) from exc
 
         if document is None:
-            raise RegisteredModelNotFoundError(name)
+            raise RepositoryNotFoundError(name)
 
         return RegisteredModelRecord.from_document(document)
 
@@ -352,13 +352,13 @@ class RegisteredModelRepository:
             The deleted :class:`RegisteredModelRecord`.
 
         Raises:
-            RegisteredModelNotFoundError: If the registered model does not
+            RepositoryNotFoundError: If the registered model does not
                 exist.
         """
         with repository_operation("Unable to delete."):
             document = self._collection.find_one_and_delete({"name": name})
         if document is None:
-            raise RegisteredModelNotFoundError(name)
+            raise RepositoryNotFoundError(name)
 
         return RegisteredModelRecord.from_document(document)
 
@@ -374,7 +374,7 @@ class RegisteredModelRepository:
             The updated :class:`RegisteredModelRecord`.
 
         Raises:
-            RegisteredModelNotFoundError: If the registered model does not
+            RepositoryNotFoundError: If the registered model does not
                 exist.
         """
         update = build_replace_array_element_pipeline(
@@ -390,7 +390,7 @@ class RegisteredModelRepository:
                 return_document=ReturnDocument.AFTER,
             )
         if document is None:
-            raise RegisteredModelNotFoundError(name)
+            raise RepositoryNotFoundError(name)
 
         return RegisteredModelRecord.from_document(document)
 
@@ -405,7 +405,7 @@ class RegisteredModelRepository:
             The updated :class:`RegisteredModelRecord`.
 
         Raises:
-            RegisteredModelNotFoundError: If the registered model does not
+            RepositoryNotFoundError: If the registered model does not
                 exist.
         """
         update = build_remove_array_element_update(
@@ -420,7 +420,7 @@ class RegisteredModelRepository:
                 return_document=ReturnDocument.AFTER,
             )
         if document is None:
-            raise RegisteredModelNotFoundError(name)
+            raise RepositoryNotFoundError(name)
 
         return RegisteredModelRecord.from_document(document)
 
@@ -442,7 +442,7 @@ class RegisteredModelRepository:
             The updated :class:`RegisteredModelRecord`.
 
         Raises:
-            RegisteredModelNotFoundError: If the registered model does not
+            RepositoryNotFoundError: If the registered model does not
                 exist.
         """
         update = build_replace_array_element_pipeline(
@@ -458,7 +458,7 @@ class RegisteredModelRepository:
                 return_document=ReturnDocument.AFTER,
             )
         if document is None:
-            raise RegisteredModelNotFoundError(name)
+            raise RepositoryNotFoundError(name)
 
         return RegisteredModelRecord.from_document(document)
 
@@ -473,7 +473,7 @@ class RegisteredModelRepository:
             The updated :class:`RegisteredModelRecord`.
 
         Raises:
-            RegisteredModelNotFoundError: If the registered model does not
+            RepositoryNotFoundError: If the registered model does not
                 exist.
         """
         with repository_operation("Unable to delete alias by name."):
@@ -483,7 +483,7 @@ class RegisteredModelRepository:
                 return_document=ReturnDocument.AFTER,
             )
         if document is None:
-            raise RegisteredModelNotFoundError(name)
+            raise RepositoryNotFoundError(name)
 
         return RegisteredModelRecord.from_document(document)
 
@@ -505,7 +505,7 @@ class RegisteredModelRepository:
             The updated :class:`RegisteredModelRecord`.
 
         Raises:
-            RegisteredModelNotFoundError: If the registered model does not
+            RepositoryNotFoundError: If the registered model does not
                 exist.
         """
         with repository_operation("Unable to delete aliases for version and touch."):
@@ -518,7 +518,7 @@ class RegisteredModelRepository:
                 return_document=ReturnDocument.AFTER,
             )
         if document is None:
-            raise RegisteredModelNotFoundError(str(model_id))
+            raise RepositoryNotFoundError(str(model_id))
 
         return RegisteredModelRecord.from_document(document)
 

@@ -15,11 +15,9 @@ from mlflow.protos.databricks_pb2 import (
 )
 
 from mlflow_mongodb import MongoDBModelRegistryStore
-from mlflow_mongodb.model_registry.errors import (
-    ModelVersionAlreadyExistsError,
-    ModelVersionNotFoundError,
-    RegisteredModelAlreadyExistsError,
-    RegisteredModelNotFoundError,
+from mlflow_mongodb.infrastructure.errors import (
+    RepositoryAlreadyExistsError,
+    RepositoryNotFoundError,
 )
 
 MODEL_NAME = "fraud-detector"
@@ -91,7 +89,7 @@ def test_create_registered_model_translates_duplicate_error(
     registered_model_repository,
     registered_model_record_factory,
 ):
-    registered_model_repository.create.side_effect = RegisteredModelAlreadyExistsError(MODEL_NAME)
+    registered_model_repository.create.side_effect = RepositoryAlreadyExistsError(MODEL_NAME)
     registered_model_repository.find_by_name.return_value = registered_model_record_factory(
         name=MODEL_NAME
     )
@@ -152,7 +150,7 @@ def test_update_registered_model_translates_not_found_error(
     store,
     registered_model_repository,
 ):
-    registered_model_repository.update.side_effect = RegisteredModelNotFoundError(MODEL_NAME)
+    registered_model_repository.update.side_effect = RepositoryNotFoundError(MODEL_NAME)
 
     with pytest.raises(MlflowException, match="Registered Model.*not found") as exc_info:
         store.update_registered_model(MODEL_NAME, "new description")
@@ -191,12 +189,12 @@ def test_rename_registered_model_converts_latest_versions(
     ("repository_error", "expected_code", "message"),
     [
         (
-            RegisteredModelNotFoundError(MODEL_NAME),
+            RepositoryNotFoundError(MODEL_NAME),
             ErrorCode.Name(RESOURCE_DOES_NOT_EXIST),
             "not found",
         ),
         (
-            RegisteredModelAlreadyExistsError(RENAMED_MODEL_NAME),
+            RepositoryAlreadyExistsError(RENAMED_MODEL_NAME),
             ErrorCode.Name(RESOURCE_ALREADY_EXISTS),
             "already exists",
         ),
@@ -378,8 +376,8 @@ def test_create_model_version_translates_missing_model(
         registered_model_repository.find_by_name.return_value = registered_model_record_factory(
             name=MODEL_NAME
         )
-        registered_model_repository.allocate_next_version.side_effect = (
-            RegisteredModelNotFoundError(MODEL_NAME)
+        registered_model_repository.allocate_next_version.side_effect = RepositoryNotFoundError(
+            MODEL_NAME
         )
 
     with pytest.raises(MlflowException, match="Registered Model.*not found") as exc_info:
@@ -398,7 +396,7 @@ def test_create_model_version_translates_allocated_version_collision(
         name=MODEL_NAME
     )
     registered_model_repository.allocate_next_version.return_value = 3
-    model_version_repository.create.side_effect = ModelVersionAlreadyExistsError("collision")
+    model_version_repository.create.side_effect = RepositoryAlreadyExistsError("collision")
 
     with pytest.raises(MlflowException, match="allocated version already exists") as exc_info:
         store.create_model_version(MODEL_NAME, SOURCE)
@@ -565,14 +563,14 @@ def test_transition_model_version_stage_translates_repository_not_found(
     model = registered_model_record_factory(name=MODEL_NAME)
     registered_model_repository.find_by_name.return_value = model
     if failure_point == "version":
-        model_version_repository.transition_stage.side_effect = ModelVersionNotFoundError("2")
+        model_version_repository.transition_stage.side_effect = RepositoryNotFoundError("2")
     else:
         model_version_repository.transition_stage.return_value = model_version_record_factory(
             registered_model_id=model.model_id,
             version=2,
             current_stage="Staging",
         )
-        registered_model_repository.touch.side_effect = RegisteredModelNotFoundError(MODEL_NAME)
+        registered_model_repository.touch.side_effect = RepositoryNotFoundError(MODEL_NAME)
 
     with pytest.raises(MlflowException, match="Model Version.*not found") as exc_info:
         store.transition_model_version_stage(
@@ -616,9 +614,7 @@ def test_set_registered_model_alias_translates_repository_not_found(
     model_version_repository,
 ):
     model_version_repository.exists_for_registered_model.return_value = True
-    registered_model_repository.set_alias_by_name.side_effect = RegisteredModelNotFoundError(
-        MODEL_NAME
-    )
+    registered_model_repository.set_alias_by_name.side_effect = RepositoryNotFoundError(MODEL_NAME)
 
     with pytest.raises(MlflowException, match="Model Version.*not found") as exc_info:
         store.set_registered_model_alias(MODEL_NAME, "candidate", 2)
@@ -636,7 +632,7 @@ def test_delete_model_version_translates_alias_cleanup_not_found(
         name=MODEL_NAME
     )
     registered_model_repository.delete_aliases_for_version_and_touch.side_effect = (
-        RegisteredModelNotFoundError(MODEL_NAME)
+        RepositoryNotFoundError(MODEL_NAME)
     )
 
     with pytest.raises(MlflowException, match="Model Version.*not found") as exc_info:

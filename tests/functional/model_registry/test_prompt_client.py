@@ -6,12 +6,8 @@ PROMPT_NAME = "mongodb-client-functional-prompt"
 PROMPT_TEMPLATE = "Summarize {{document}} in three sentences."
 
 
-def test_mlflow_client_prompt_lifecycle(
-    mongodb_uri: str,
-    tmp_path,
-):
-    tracking_uri = f"sqlite:///{tmp_path / 'tracking.db'}"
-    client = MlflowClient(tracking_uri=tracking_uri, registry_uri=mongodb_uri)
+def test_mlflow_client_prompt_lifecycle(mongodb_uri: str):
+    client = MlflowClient(tracking_uri=mongodb_uri, registry_uri=mongodb_uri)
 
     created = client.register_prompt(
         name=PROMPT_NAME,

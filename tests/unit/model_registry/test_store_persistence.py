@@ -8,8 +8,10 @@ from mlflow.protos.databricks_pb2 import INTERNAL_ERROR, ErrorCode
 
 import mlflow_mongodb.model_registry.store as registry_store
 from mlflow_mongodb import MongoDBModelRegistryStore
-from mlflow_mongodb.infrastructure.errors import RepositoryPersistenceError
-from mlflow_mongodb.model_registry.errors import RegisteredModelAlreadyExistsError
+from mlflow_mongodb.infrastructure.errors import (
+    RepositoryAlreadyExistsError,
+    RepositoryPersistenceError,
+)
 
 
 def test_create_model_version_handles_failure_after_version_allocation(
@@ -34,9 +36,7 @@ def test_create_model_version_handles_failure_after_version_allocation(
 
 
 def test_duplicate_model_recovery_translates_lookup_failure(store, registered_model_repository):
-    registered_model_repository.create.side_effect = RegisteredModelAlreadyExistsError(
-        "example-model"
-    )
+    registered_model_repository.create.side_effect = RepositoryAlreadyExistsError("example-model")
     registered_model_repository.find_by_name.side_effect = RepositoryPersistenceError(
         "Private recovery lookup failure"
     )

@@ -18,13 +18,13 @@ from mlflow_mongodb.infrastructure.array_operations import (
     build_remove_array_element_update,
     build_replace_array_element_pipeline,
 )
+from mlflow_mongodb.infrastructure.errors import (
+    RepositoryAlreadyExistsError,
+    RepositoryNotFoundError,
+)
 from mlflow_mongodb.infrastructure.repository_operations import repository_operation
 from mlflow_mongodb.infrastructure.search_filters import build_value_condition
 from mlflow_mongodb.infrastructure.settings import MongoDBSettings
-from mlflow_mongodb.model_registry.errors import (
-    ModelVersionAlreadyExistsError,
-    ModelVersionNotFoundError,
-)
 from mlflow_mongodb.model_registry.types import (
     ModelVersionRecord,
     ModelVersionSearchResult,
@@ -131,7 +131,7 @@ class ModelVersionRepository:
             The created :class:`ModelVersionRecord`.
 
         Raises:
-            ModelVersionAlreadyExistsError: If the version already exists for
+            RepositoryAlreadyExistsError: If the version already exists for
                 the registered model.
         """
         document: dict[str, Any] = {
@@ -156,7 +156,7 @@ class ModelVersionRepository:
             try:
                 result = self._collection.insert_one(document)
             except DuplicateKeyError as exc:
-                raise ModelVersionAlreadyExistsError(f"{registered_model_id}:{version}") from exc
+                raise RepositoryAlreadyExistsError(f"{registered_model_id}:{version}") from exc
 
         document["_id"] = result.inserted_id
         return ModelVersionRecord.from_document(document)
@@ -181,7 +181,7 @@ class ModelVersionRepository:
             The updated :class:`ModelVersionRecord`.
 
         Raises:
-            ModelVersionNotFoundError: If the model version does not exist or
+            RepositoryNotFoundError: If the model version does not exist or
                 has been soft-deleted.
         """
         with repository_operation("Unable to update description."):
@@ -200,7 +200,7 @@ class ModelVersionRepository:
                 return_document=ReturnDocument.AFTER,
             )
         if document is None:
-            raise ModelVersionNotFoundError(f"{registered_model_id}:{version}")
+            raise RepositoryNotFoundError(f"{registered_model_id}:{version}")
 
         return ModelVersionRecord.from_document(document)
 
@@ -224,7 +224,7 @@ class ModelVersionRepository:
             The updated :class:`ModelVersionRecord`.
 
         Raises:
-            ModelVersionNotFoundError: If the model version does not exist or
+            RepositoryNotFoundError: If the model version does not exist or
                 has been soft-deleted.
         """
         with repository_operation("Unable to transition stage."):
@@ -243,7 +243,7 @@ class ModelVersionRepository:
                 return_document=ReturnDocument.AFTER,
             )
         if document is None:
-            raise ModelVersionNotFoundError(f"{registered_model_id}:{version}")
+            raise RepositoryNotFoundError(f"{registered_model_id}:{version}")
 
         return ModelVersionRecord.from_document(document)
 
@@ -325,7 +325,7 @@ class ModelVersionRepository:
             The redacted, soft-deleted :class:`ModelVersionRecord`.
 
         Raises:
-            ModelVersionNotFoundError: If the model version does not exist or
+            RepositoryNotFoundError: If the model version does not exist or
                 has already been soft-deleted.
         """
         with repository_operation("Unable to soft delete."):
@@ -350,7 +350,7 @@ class ModelVersionRepository:
                 return_document=ReturnDocument.AFTER,
             )
         if document is None:
-            raise ModelVersionNotFoundError(f"{registered_model_id}:{version}")
+            raise RepositoryNotFoundError(f"{registered_model_id}:{version}")
 
         return ModelVersionRecord.from_document(document)
 
@@ -391,7 +391,7 @@ class ModelVersionRepository:
             The updated :class:`ModelVersionRecord`.
 
         Raises:
-            ModelVersionNotFoundError: If the model version does not exist or
+            RepositoryNotFoundError: If the model version does not exist or
                 has been soft-deleted.
         """
         update = build_replace_array_element_pipeline(
@@ -411,7 +411,7 @@ class ModelVersionRepository:
                 return_document=ReturnDocument.AFTER,
             )
         if document is None:
-            raise ModelVersionNotFoundError(f"{registered_model_id}:{version}")
+            raise RepositoryNotFoundError(f"{registered_model_id}:{version}")
 
         return ModelVersionRecord.from_document(document)
 
@@ -433,7 +433,7 @@ class ModelVersionRepository:
             The updated :class:`ModelVersionRecord`.
 
         Raises:
-            ModelVersionNotFoundError: If the model version does not exist or
+            RepositoryNotFoundError: If the model version does not exist or
                 has been soft-deleted.
         """
         update = build_remove_array_element_update(
@@ -452,7 +452,7 @@ class ModelVersionRepository:
                 return_document=ReturnDocument.AFTER,
             )
         if document is None:
-            raise ModelVersionNotFoundError(f"{registered_model_id}:{version}")
+            raise RepositoryNotFoundError(f"{registered_model_id}:{version}")
 
         return ModelVersionRecord.from_document(document)
 

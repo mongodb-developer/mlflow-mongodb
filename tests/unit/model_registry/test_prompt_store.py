@@ -4,9 +4,9 @@ import pytest
 from mlflow.exceptions import MlflowException
 from mlflow.prompt.constants import IS_PROMPT_TAG_KEY, PROMPT_TEXT_TAG_KEY
 
-from mlflow_mongodb.model_registry.errors import (
-    RegisteredModelAlreadyExistsError,
-    RegisteredModelNotFoundError,
+from mlflow_mongodb.infrastructure.errors import (
+    RepositoryAlreadyExistsError,
+    RepositoryNotFoundError,
 )
 
 PROMPT_NAME = "support-assistant"
@@ -125,7 +125,7 @@ def test_delete_missing_prompt_raises_mlflow_exception(
     registered_model_repository,
     model_version_repository,
 ):
-    registered_model_repository.delete.side_effect = RegisteredModelNotFoundError(PROMPT_NAME)
+    registered_model_repository.delete.side_effect = RepositoryNotFoundError(PROMPT_NAME)
 
     with pytest.raises(MlflowException, match=f"name={PROMPT_NAME} not found"):
         store.delete_prompt(PROMPT_NAME)
@@ -138,7 +138,7 @@ def test_create_prompt_rejects_name_owned_by_model(
     registered_model_repository,
     registered_model_record_factory,
 ):
-    registered_model_repository.create.side_effect = RegisteredModelAlreadyExistsError(PROMPT_NAME)
+    registered_model_repository.create.side_effect = RepositoryAlreadyExistsError(PROMPT_NAME)
     registered_model_repository.find_by_name.return_value = registered_model_record_factory(
         name=PROMPT_NAME,
     )
@@ -346,7 +346,7 @@ def test_delete_prompt_alias_translates_missing_prompt(
     store,
     registered_model_repository,
 ):
-    registered_model_repository.delete_alias_by_name.side_effect = RegisteredModelNotFoundError(
+    registered_model_repository.delete_alias_by_name.side_effect = RepositoryNotFoundError(
         PROMPT_NAME
     )
 

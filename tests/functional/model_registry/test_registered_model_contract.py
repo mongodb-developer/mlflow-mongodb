@@ -11,7 +11,7 @@ from mlflow.protos.databricks_pb2 import (
 )
 
 from mlflow_mongodb import MongoDBModelRegistryStore
-from mlflow_mongodb.model_registry.errors import RegisteredModelNotFoundError
+from mlflow_mongodb.infrastructure.errors import RepositoryNotFoundError
 
 
 def _latest_versions_by_stage(versions):
@@ -30,7 +30,7 @@ def test_registered_model_repository_operations_reject_deleted_model(
     assert model is not None
     store.delete_registered_model(name)
 
-    with pytest.raises(RegisteredModelNotFoundError) as caught:
+    with pytest.raises(RepositoryNotFoundError) as caught:
         getattr(repository, operation)(
             model_id=model.model_id,
             last_updated_timestamp=model.last_updated_timestamp + 1,
