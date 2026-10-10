@@ -380,7 +380,6 @@ class RegisteredModelRepository:
         update = build_replace_array_element_pipeline(
             array_field="tags",
             key_field="key",
-            key=key,
             element={"key": key, "value": value},
         )
         with repository_operation("Unable to set tag."):
@@ -448,7 +447,6 @@ class RegisteredModelRepository:
         update = build_replace_array_element_pipeline(
             array_field="aliases",
             key_field="alias",
-            key=alias,
             element={"alias": alias, "version": version},
         )
         with repository_operation("Unable to set alias by name."):
