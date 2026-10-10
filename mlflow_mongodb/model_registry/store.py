@@ -366,10 +366,12 @@ class MongoDBModelRegistryStore(AbstractStore):
             field_types=("attribute", "tag"),
             attribute_keys=SearchModelVersionUtils.VALID_SEARCH_ATTRIBUTE_KEYS,
             comparators={
+                # MLflow supports IN only for name and run_id, not other model-version attributes.
                 "attribute": SearchModelVersionUtils.VALID_STRING_ATTRIBUTE_COMPARATORS - {"IN"},
                 "tag": SearchModelVersionUtils.VALID_TAG_COMPARATORS,
             },
             field_comparators={
+                ("attribute", "name"): SearchModelVersionUtils.VALID_STRING_ATTRIBUTE_COMPARATORS,
                 ("attribute", "run_id"): SearchModelVersionUtils.VALID_STRING_ATTRIBUTE_COMPARATORS,
                 **{
                     ("attribute", key): SearchModelVersionUtils.VALID_NUMERIC_ATTRIBUTE_COMPARATORS

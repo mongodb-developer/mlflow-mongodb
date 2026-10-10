@@ -14,6 +14,10 @@ from mlflow_mongodb.model_registry.repositories import (
     RegisteredModelOrder,
 )
 
+SUPPORTS_MODEL_NAME_LIST_FILTERS = "name" in getattr(
+    SearchModelVersionUtils, "LIST_SUPPORTED_KEYS", ()
+)
+
 
 @pytest.mark.parametrize(
     ("filter_string", "expected_filter"),
@@ -53,6 +57,15 @@ def test_parse_registered_model_filters_adds_prompt_exclusion(
             "name ILIKE 'fraud%'",
             ModelVersionFilter("attribute", "name", "ILIKE", "fraud%"),
         ),
+        pytest.param(
+            "name IN ('fraud', 'credit')",
+            ModelVersionFilter("attribute", "name", "IN", ("fraud", "credit")),
+            marks=pytest.mark.skipif(
+                not SUPPORTS_MODEL_NAME_LIST_FILTERS,
+                reason="The installed MLflow parser does not support model-name list filters",
+            ),
+            id="name-in",
+        ),
         (
             "run_id IN ('run-a', 'run-b')",
             ModelVersionFilter("attribute", "run_id", "IN", ("run-a", "run-b")),
@@ -72,6 +85,22 @@ def test_parse_model_version_filters(store, filter_string, expected_filter):
 
     assert filters == (expected_filter,)
     assert exclude_prompts is True
+
+
+@pytest.mark.skipif(
+    SUPPORTS_MODEL_NAME_LIST_FILTERS,
+    reason="The installed MLflow parser supports model-name list filters",
+)
+def test_model_name_list_filter_is_rejected_by_unsupported_mlflow_parser(
+    store, model_version_repository
+):
+    with pytest.raises(
+        MlflowException, match="comparison with a list of quoted string values"
+    ) as exc_info:
+        store.search_model_versions("name IN ('fraud', 'credit')")
+
+    assert exc_info.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
+    model_version_repository.search.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -107,8 +136,8 @@ def test_parse_model_version_prompt_filter_controls_exclusion(
         ),
         (
             "_parse_model_version_filters",
-            "name IN ('fraud', 'credit')",
-            "Only the 'run_id' attribute",
+            "source_path IN ('fraud', 'credit')",
+            "comparison with a list of quoted string values",
         ),
         (
             "_parse_model_version_filters",
