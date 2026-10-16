@@ -11,7 +11,8 @@ store.
 
 ## Installation
 
-Python 3.10 or newer, MLflow 3.1 or newer, and a MongoDB deployment are required.
+Python 3.10 or newer, MLflow 3.5 or newer within the 3.x series, and a MongoDB deployment
+are required.
 
 ```bash
 python -m pip install "mlflow-mongodb>=0.1.0.dev0"
@@ -49,6 +50,21 @@ provided using standard MongoDB URI syntax. For example:
 ```text
 mongodb://username:password@mongo.example.com:27017/mlflow_registry?authSource=admin
 ```
+
+When using the MongoDB tracking backend, MLflow 3.5 clients upload full trace payloads to
+MLflow's existing artifact storage. Configure a reachable experiment artifact location,
+such as S3 or an MLflow artifact proxy. The MongoDB store returns the trace artifact URI;
+it does not implement its own artifact provider or upload the payload itself.
+
+On MLflow 3.5 servers, trace retrieval uses artifacts while spans are also persisted in
+MongoDB. On MLflow 3.6 and newer servers, modern clients use MongoDB-backed trace retrieval.
+A 3.5 client cannot read a trace written only to MongoDB by a modern client unless an
+artifact payload also exists. Cross-version reads of that kind are not guaranteed.
+
+Aggregated trace metric queries require MLflow 3.9 or newer; available metrics and dimensions
+depend on the installed MLflow version. Older versions preserve native MLflow spans without
+newer OTel translations, and derive cost summaries only when MLflow provides its cost aggregator.
+These limitations do not disable run metric logging.
 
 ## Documentation
 

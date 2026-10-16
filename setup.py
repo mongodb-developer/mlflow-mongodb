@@ -18,7 +18,7 @@ setup(
         # Temporary workaround for https://github.com/mlflow/mlflow/pull/25559.
         # Remove once the upstream WSGI code is fixed or MLflow lifts the version block.
         "anyio>=3.6.2,!=4.15.0,<5",
-        "mlflow>=3.1.0",
+        "mlflow>=3.5.0,<4",
         "pymongo[srv]>=4.0.0,<5",
     ],
     extras_require={
@@ -31,6 +31,10 @@ setup(
         ],
     },
     entry_points={
+        "mlflow.tracking_store": [
+            "mongodb=mlflow_mongodb.tracking.store:MongoDBTrackingStore",
+            "mongodb+srv=mlflow_mongodb.tracking.store:MongoDBTrackingStore",
+        ],
         "mlflow.model_registry_store": [
             "mongodb=mlflow_mongodb.model_registry.store:MongoDBModelRegistryStore",
             "mongodb+srv=mlflow_mongodb.model_registry.store:MongoDBModelRegistryStore",

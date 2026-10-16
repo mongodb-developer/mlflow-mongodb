@@ -1,10 +1,10 @@
 """Functional assertions for production MongoDB index definitions."""
 
-from mlflow_mongodb import MongoDBModelRegistryStore
 from mlflow_mongodb.model_registry.repositories import (
     ModelVersionRepository,
     RegisteredModelRepository,
 )
+from mlflow_mongodb.model_registry.store import MongoDBModelRegistryStore
 
 
 def _application_indexes(store, collection_name):

@@ -9,11 +9,25 @@ from dataclasses import dataclass
 class MongoDBSettings:
     """Configuration for MongoDB collection names."""
 
+    experiments_collection_name: str = "experiments"
+    runs_collection_name: str = "runs"
+    run_metrics_collection_name: str = "run_metrics"
+    traces_collection_name: str = "traces"
+    spans_collection_name: str = "spans"
+    assessments_collection_name: str = "assessments"
+    logged_models_collection_name: str = "logged_models"
     registered_models_collection_name: str = "registered_models"
     model_versions_collection_name: str = "model_versions"
 
     def __post_init__(self) -> None:
         for field_name in (
+            "experiments_collection_name",
+            "runs_collection_name",
+            "run_metrics_collection_name",
+            "traces_collection_name",
+            "spans_collection_name",
+            "assessments_collection_name",
+            "logged_models_collection_name",
             "registered_models_collection_name",
             "model_versions_collection_name",
         ):
@@ -31,6 +45,34 @@ class MongoDBSettings:
         """Load collection-name overrides from environment variables."""
         environment = os.environ if environ is None else environ
         return cls(
+            experiments_collection_name=environment.get(
+                "MLFLOW_MONGODB_EXPERIMENTS_COLLECTION",
+                cls.experiments_collection_name,
+            ),
+            runs_collection_name=environment.get(
+                "MLFLOW_MONGODB_RUNS_COLLECTION",
+                cls.runs_collection_name,
+            ),
+            run_metrics_collection_name=environment.get(
+                "MLFLOW_MONGODB_RUN_METRICS_COLLECTION",
+                cls.run_metrics_collection_name,
+            ),
+            traces_collection_name=environment.get(
+                "MLFLOW_MONGODB_TRACES_COLLECTION",
+                cls.traces_collection_name,
+            ),
+            spans_collection_name=environment.get(
+                "MLFLOW_MONGODB_SPANS_COLLECTION",
+                cls.spans_collection_name,
+            ),
+            assessments_collection_name=environment.get(
+                "MLFLOW_MONGODB_ASSESSMENTS_COLLECTION",
+                cls.assessments_collection_name,
+            ),
+            logged_models_collection_name=environment.get(
+                "MLFLOW_MONGODB_LOGGED_MODELS_COLLECTION",
+                cls.logged_models_collection_name,
+            ),
             registered_models_collection_name=environment.get(
                 "MLFLOW_MONGODB_REGISTERED_MODELS_COLLECTION",
                 cls.registered_models_collection_name,

@@ -28,8 +28,8 @@ def build_value_condition(
         return value
     if comparator in COMPARISON_OPERATORS:
         return {COMPARISON_OPERATORS[comparator]: value}
-    if comparator == "IN":
-        return {"$in": list(value)}
+    if comparator in ("IN", "NOT IN"):
+        return {"$in" if comparator == "IN" else "$nin": list(value)}
     if comparator in ("LIKE", "ILIKE"):
         return like_regex(str(value), comparator)
     raise ValueError(f"Unsupported comparator: {comparator}")

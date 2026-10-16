@@ -6,13 +6,13 @@ from mlflow.prompt.constants import IS_PROMPT_TAG_KEY
 from mlflow.protos.databricks_pb2 import INVALID_PARAMETER_VALUE, ErrorCode
 from mlflow.utils.search_utils import SearchModelUtils, SearchModelVersionUtils, SearchUtils
 
-from mlflow_mongodb import MongoDBModelRegistryStore
 from mlflow_mongodb.model_registry.repositories import (
     ModelVersionFilter,
     ModelVersionOrder,
     RegisteredModelFilter,
     RegisteredModelOrder,
 )
+from mlflow_mongodb.model_registry.store import MongoDBModelRegistryStore
 
 SUPPORTS_MODEL_NAME_LIST_FILTERS = "name" in getattr(
     SearchModelVersionUtils, "LIST_SUPPORTED_KEYS", ()
