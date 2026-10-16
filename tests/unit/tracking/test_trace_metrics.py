@@ -4,26 +4,33 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
-from mlflow.entities.trace_metrics import (
-    AggregationType,
-    MetricAggregation,
-    MetricDataPoint,
-    MetricViewType,
-)
 from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import INTERNAL_ERROR, INVALID_PARAMETER_VALUE, ErrorCode
-from mlflow.tracing.constant import (
-    AssessmentMetricDimensionKey,
-    AssessmentMetricKey,
-    TraceMetricKey,
-)
 from pymongo.errors import OperationFailure
 
 from mlflow_mongodb.infrastructure.errors import (
     RepositoryPersistenceError,
     RepositoryUnsupportedFieldTypeError,
 )
+from mlflow_mongodb.tracking._compat import (  # ruff: ignore[import-private-name]
+    TRACE_METRICS_AVAILABLE,
+)
 from mlflow_mongodb.tracking.repositories import TraceRepository
+
+if TRACE_METRICS_AVAILABLE:
+    from mlflow.entities.trace_metrics import (
+        AggregationType,
+        MetricAggregation,
+        MetricDataPoint,
+        MetricViewType,
+    )
+    from mlflow.tracing.constant import (
+        AssessmentMetricDimensionKey,
+        AssessmentMetricKey,
+        TraceMetricKey,
+    )
+else:
+    pytest.skip("Trace metric queries require MLflow 3.9 or newer", allow_module_level=True)
 
 
 @pytest.mark.parametrize(

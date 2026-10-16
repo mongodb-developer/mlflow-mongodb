@@ -5,21 +5,32 @@ import json
 import pytest
 from mlflow.entities import TraceState
 from mlflow.entities.assessment import Expectation, Feedback
-from mlflow.entities.trace_metrics import AggregationType, MetricAggregation, MetricViewType
 from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import INVALID_PARAMETER_VALUE, ErrorCode
-from mlflow.tracing.constant import (
-    AssessmentMetricDimensionKey,
-    AssessmentMetricKey,
-    SpanAttributeKey,
-    SpanMetricDimensionKey,
-    SpanMetricKey,
-    TraceMetadataKey,
-    TraceMetricDimensionKey,
-    TraceMetricKey,
-    TraceTagKey,
-)
 from opentelemetry.trace import StatusCode
+
+from mlflow_mongodb.tracking._compat import (  # ruff: ignore[import-private-name]
+    SPAN_COST_ATTRIBUTE,
+    SPAN_MODEL_ATTRIBUTE,
+    SPAN_PROVIDER_ATTRIBUTE,
+    TRACE_METRICS_AVAILABLE,
+)
+
+if TRACE_METRICS_AVAILABLE:
+    from mlflow.entities.trace_metrics import AggregationType, MetricAggregation, MetricViewType
+    from mlflow.tracing.constant import (
+        AssessmentMetricDimensionKey,
+        AssessmentMetricKey,
+        SpanAttributeKey,
+        SpanMetricDimensionKey,
+        SpanMetricKey,
+        TraceMetadataKey,
+        TraceMetricDimensionKey,
+        TraceMetricKey,
+        TraceTagKey,
+    )
+else:
+    pytest.skip("Trace metric queries require MLflow 3.9 or newer", allow_module_level=True)
 
 
 def test_trace_latency_groups_by_name_and_utc_time_bucket(store, trace_info_factory):
@@ -249,6 +260,10 @@ def test_latency_percentile_uses_requested_percentile_aggregation(store, trace_i
     assert result[0].values == {"P95": 10}
 
 
+@pytest.mark.skipif(
+    not hasattr(TraceMetricKey, "SESSION_COUNT"),
+    reason="Installed MLflow has no session-count metric",
+)
 def test_session_count_counts_unique_session_ids(store, trace_info_factory):
     for session in ("one", "one", "two"):
         store.start_trace(
@@ -358,6 +373,10 @@ def test_span_latency_converts_nanoseconds_to_whole_milliseconds(
     assert result[0].values == {"AVG": expected_ms}
 
 
+@pytest.mark.skipif(
+    not hasattr(SpanMetricKey, "TOTAL_COST"),
+    reason="Installed MLflow has no span-cost metrics",
+)
 def test_span_metrics_filter_child_rows_and_use_native_cost(store, trace, span_factory):
     spans = [
         span_factory(
@@ -365,8 +384,8 @@ def test_span_metrics_filter_child_rows_and_use_native_cost(store, trace, span_f
             span_id=1,
             attributes={
                 SpanAttributeKey.SPAN_TYPE: "LLM",
-                SpanAttributeKey.LLM_COST: {"total_cost": 0.2},
-                SpanAttributeKey.MODEL: "model-a",
+                SPAN_COST_ATTRIBUTE: {"total_cost": 0.2},
+                SPAN_MODEL_ATTRIBUTE: "model-a",
             },
         ),
         span_factory(
@@ -375,8 +394,8 @@ def test_span_metrics_filter_child_rows_and_use_native_cost(store, trace, span_f
             parent_id=1,
             attributes={
                 SpanAttributeKey.SPAN_TYPE: "CHAIN",
-                SpanAttributeKey.LLM_COST: {"total_cost": 9.0},
-                SpanAttributeKey.MODEL: "model-b",
+                SPAN_COST_ATTRIBUTE: {"total_cost": 9.0},
+                SPAN_MODEL_ATTRIBUTE: "model-b",
             },
         ),
     ]
@@ -395,14 +414,25 @@ def test_span_metrics_filter_child_rows_and_use_native_cost(store, trace, span_f
     assert result[0].values["SUM"] == pytest.approx(0.2)
 
 
+@pytest.mark.skipif(
+    not all(
+        hasattr(SpanMetricDimensionKey, name) for name in ("SPAN_MODEL_NAME", "SPAN_MODEL_PROVIDER")
+    ),
+    reason="Installed MLflow has no span model metric dimensions",
+)
 @pytest.mark.parametrize(
     "attribute,stored_field,dimension,value",
     [
-        (SpanAttributeKey.MODEL, "model", SpanMetricDimensionKey.SPAN_MODEL_NAME, "model-a"),
         (
-            SpanAttributeKey.MODEL_PROVIDER,
+            SPAN_MODEL_ATTRIBUTE,
+            "model",
+            getattr(SpanMetricDimensionKey, "SPAN_MODEL_NAME", None),
+            "model-a",
+        ),
+        (
+            SPAN_PROVIDER_ATTRIBUTE,
             "provider",
-            SpanMetricDimensionKey.SPAN_MODEL_PROVIDER,
+            getattr(SpanMetricDimensionKey, "SPAN_MODEL_PROVIDER", None),
             "provider-a",
         ),
     ],

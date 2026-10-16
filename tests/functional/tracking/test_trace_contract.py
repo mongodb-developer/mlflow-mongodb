@@ -13,12 +13,20 @@ from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import RESOURCE_DOES_NOT_EXIST, ErrorCode
 from mlflow.tracing.constant import (
     SpanAttributeKey,
-    SpansLocation,
     TraceMetadataKey,
     TraceSizeStatsKey,
-    TraceTagKey,
 )
+from mlflow.utils.mlflow_tags import MLFLOW_ARTIFACT_LOCATION
 from opentelemetry.trace import StatusCode
+
+from mlflow_mongodb.tracking._compat import (  # ruff: ignore[import-private-name]
+    SPAN_COST_ATTRIBUTE,
+    SPAN_SESSION_ATTRIBUTE,
+    SPAN_TRACE_TAG_PREFIX,
+    SPANS_LOCATION,
+    SPANS_LOCATION_TAG,
+    TRACE_COST_METADATA,
+)
 
 
 def test_start_trace_round_trips_metadata_and_native_assessment_values(store, trace_info_factory):
@@ -28,7 +36,7 @@ def test_start_trace_round_trips_metadata_and_native_assessment_values(store, tr
             TraceMetadataKey.SOURCE_RUN: "run",
             TraceMetadataKey.SIZE_STATS: json.dumps({TraceSizeStatsKey.NUM_SPANS: 2}),
             TraceMetadataKey.TOKEN_USAGE: '{"input_tokens": 4}',
-            TraceMetadataKey.COST: '{"total_cost": 0.2}',
+            TRACE_COST_METADATA: '{"total_cost": 0.2}',
         },
         request_preview="$request",
         response_preview="$response",
@@ -52,7 +60,11 @@ def test_start_trace_round_trips_metadata_and_native_assessment_values(store, tr
     assert loaded.client_request_id == "$client"
     assert loaded.tags == {
         "team.name": "$risk",
-        TraceTagKey.SPANS_LOCATION: SpansLocation.TRACKING_STORE.value,
+        SPANS_LOCATION_TAG: SPANS_LOCATION,
+        MLFLOW_ARTIFACT_LOCATION: (
+            f"{store.get_experiment(info.experiment_id).artifact_location}"
+            f"/traces/{info.trace_id}/artifacts"
+        ),
     }
     assert loaded.trace_metadata == info.trace_metadata
     assert loaded.assessments[0].value == {"answer": [1, True]}
@@ -89,8 +101,8 @@ def test_child_first_delivery_creates_placeholder_and_late_root_refreshes_summar
         trace_id=info.trace_id,
         status=status,
         attributes={
-            SpanAttributeKey.TRACE_TAG_PREFIX + "team": "$root",
-            SpanAttributeKey.SESSION_ID: "session",
+            SPAN_TRACE_TAG_PREFIX + "team": "$root",
+            SPAN_SESSION_ATTRIBUTE: "session",
             SpanAttributeKey.CHAT_USAGE: {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
             SpanAttributeKey.INPUTS: "question",
             SpanAttributeKey.OUTPUTS: "answer",
@@ -128,7 +140,7 @@ def test_span_summary_preserves_authoritative_trace_fields(store, trace_info_fac
         tags={"team": "explicit"},
         trace_metadata={
             TraceMetadataKey.TOKEN_USAGE: '{"input_tokens": 20}',
-            TraceMetadataKey.COST: '{"total_cost": 0.5}',
+            TRACE_COST_METADATA: '{"total_cost": 0.5}',
         },
     )
     store.start_trace(info)
@@ -136,10 +148,10 @@ def test_span_summary_preserves_authoritative_trace_fields(store, trace_info_fac
         trace_id=info.trace_id,
         status=StatusCode.ERROR,
         attributes={
-            SpanAttributeKey.TRACE_TAG_PREFIX + "team": "derived",
-            SpanAttributeKey.TRACE_TAG_PREFIX + "new": "$value",
+            SPAN_TRACE_TAG_PREFIX + "team": "derived",
+            SPAN_TRACE_TAG_PREFIX + "new": "$value",
             SpanAttributeKey.CHAT_USAGE: {"input_tokens": 3},
-            SpanAttributeKey.LLM_COST: {"total_cost": 0.1},
+            SPAN_COST_ATTRIBUTE: {"total_cost": 0.1},
         },
     )
 
@@ -153,7 +165,7 @@ def test_span_summary_preserves_authoritative_trace_fields(store, trace_info_fac
     assert loaded.tags["team"] == "explicit"
     assert loaded.tags["new"] == "$value"
     assert loaded.trace_metadata[TraceMetadataKey.TOKEN_USAGE] == '{"input_tokens": 20}'
-    assert loaded.trace_metadata[TraceMetadataKey.COST] == '{"total_cost": 0.5}'
+    assert loaded.trace_metadata[TRACE_COST_METADATA] == '{"total_cost": 0.5}'
     document = store._trace_repository._collection.find_one({"_id": info.trace_id})
     assert document["token_usage"] == {"input_tokens": 20}
     assert document["cost"] == {"total_cost": 0.5}

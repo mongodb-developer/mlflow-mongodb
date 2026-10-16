@@ -1,5 +1,7 @@
 """Skeleton of the MongoDB tracking store for the agreed V1 scope."""
 
+from __future__ import annotations
+
 import asyncio
 import binascii
 import json
@@ -45,12 +47,7 @@ from mlflow.entities.logged_model_tag import LoggedModelTag
 from mlflow.entities.model_registry import PromptVersion
 from mlflow.entities.span import Span
 from mlflow.entities.span_status import SpanStatusCode
-from mlflow.entities.trace_metrics import (
-    MetricAggregation,
-    MetricDataPoint,
-    MetricViewType,
-)
-from mlflow.exceptions import MlflowException
+from mlflow.exceptions import MlflowException, MlflowNotImplementedException
 from mlflow.protos.databricks_pb2 import (
     BAD_REQUEST,
     INTERNAL_ERROR,
@@ -62,7 +59,6 @@ from mlflow.protos.databricks_pb2 import (
 )
 from mlflow.store.entities.paged_list import PagedList
 from mlflow.store.tracking import (
-    MAX_RESULTS_QUERY_TRACE_METRICS,
     SEARCH_LOGGED_MODEL_MAX_RESULTS_DEFAULT,
     SEARCH_MAX_RESULTS_DEFAULT,
     SEARCH_MAX_RESULTS_THRESHOLD,
@@ -71,23 +67,17 @@ from mlflow.store.tracking import (
 from mlflow.store.tracking.abstract_store import AbstractStore
 from mlflow.tracing.constant import (
     TRACE_REQUEST_RESPONSE_PREVIEW_MAX_LENGTH_OSS,
-    GenAiSemconvKey,
     SpanAttributeKey,
-    SpansLocation,
     TraceMetadataKey,
     TraceSizeStatsKey,
-    TraceTagKey,
 )
-from mlflow.tracing.otel.translation import translate_span_when_storing
-from mlflow.tracing.utils import (
-    SpanAggregationNode,
-    aggregate_cost_from_span_nodes,
-    aggregate_usage_from_span_nodes,
-    generate_assessment_id,
-    try_json_loads,
-)
+from mlflow.tracing.utils import generate_assessment_id
 from mlflow.tracing.utils.truncation import _get_truncated_preview
-from mlflow.utils.mlflow_tags import MLFLOW_RUN_NAME, _get_run_name_from_tags
+from mlflow.utils.mlflow_tags import (
+    MLFLOW_ARTIFACT_LOCATION,
+    MLFLOW_RUN_NAME,
+    _get_run_name_from_tags,
+)
 from mlflow.utils.name_utils import _generate_random_name
 from mlflow.utils.search_utils import (
     SearchExperimentsUtils,
@@ -140,6 +130,24 @@ from mlflow_mongodb.infrastructure.search_filters import (
 )
 from mlflow_mongodb.infrastructure.settings import MongoDBSettings
 from mlflow_mongodb.infrastructure.store_errors import handle_persistence_error
+from mlflow_mongodb.tracking._compat import (
+    CONVERSATION_ID_ATTRIBUTE,
+    LINKED_PROMPTS_TAG_KEY,
+    MAX_RESULTS_QUERY_TRACE_METRICS,
+    SPAN_COST_ATTRIBUTE,
+    SPAN_MODEL_ATTRIBUTE,
+    SPAN_PROVIDER_ATTRIBUTE,
+    SPAN_SESSION_ATTRIBUTE,
+    SPAN_TRACE_TAG_PREFIX,
+    SPAN_USER_ATTRIBUTE,
+    SPANS_LOCATION,
+    SPANS_LOCATION_TAG,
+    TRACE_COST_METADATA,
+    TRACE_METRICS_AVAILABLE,
+    aggregate_span_summaries,
+    translate_span_when_storing,
+    try_json_loads,
+)
 from mlflow_mongodb.tracking.repositories import (
     ExperimentRepository,
     LoggedModelRepository,
@@ -162,6 +170,9 @@ from mlflow_mongodb.tracking.types import (
     SpanSummaryRecord,
     TraceRecord,
 )
+
+if TRACE_METRICS_AVAILABLE:
+    from mlflow.entities.trace_metrics import MetricAggregation, MetricDataPoint, MetricViewType
 
 try:
     from mlflow.utils.search_utils import SearchEvaluationDatasetsUtils
@@ -613,6 +624,8 @@ class MongoDBTrackingStore(AbstractStore):
     def _run_filter_from_clause(clause) -> RunFilter:
         key = clause.key
         value = clause.value
+        if clause.comparator in ("IN", "NOT IN"):
+            value = tuple(value)
         if clause.field_type == "attribute":
             key = SearchUtils.translate_key_alias(key)
             if key in SearchUtils.NUMERIC_ATTRIBUTES:
@@ -1018,8 +1031,11 @@ class MongoDBTrackingStore(AbstractStore):
             )
 
         tags = dict(trace_info.tags)
-        # Span payloads belong in MongoDB, so do not advertise an artifact URI.
-        tags[TraceTagKey.SPANS_LOCATION] = SpansLocation.TRACKING_STORE.value
+        # Older clients require artifacts even when spans are also persisted in MongoDB.
+        tags[MLFLOW_ARTIFACT_LOCATION] = append_to_uri_path(
+            experiment.artifact_location, "traces", trace_info.trace_id, "artifacts"
+        )
+        tags[SPANS_LOCATION_TAG] = SPANS_LOCATION
         source_run_id = trace_info.trace_metadata.get(TraceMetadataKey.SOURCE_RUN)
         run_ids = [source_run_id] if source_run_id else []
         assessments = []
@@ -1053,7 +1069,7 @@ class MongoDBTrackingStore(AbstractStore):
                 field: self._numeric_trace_stats(trace_info.trace_metadata[key])
                 for field, key in (
                     ("token_usage", TraceMetadataKey.TOKEN_USAGE),
-                    ("cost", TraceMetadataKey.COST),
+                    ("cost", TRACE_COST_METADATA),
                 )
                 if key in trace_info.trace_metadata
             },
@@ -1366,20 +1382,20 @@ class MongoDBTrackingStore(AbstractStore):
         root_tags = {}
         if root:
             for key, value in attributes.items():
-                if key.startswith(SpanAttributeKey.TRACE_TAG_PREFIX):
-                    tag_key = key[len(SpanAttributeKey.TRACE_TAG_PREFIX) :]
-                    if tag_key != TraceTagKey.SPANS_LOCATION:
+                if key.startswith(SPAN_TRACE_TAG_PREFIX):
+                    tag_key = key[len(SPAN_TRACE_TAG_PREFIX) :]
+                    if tag_key not in (SPANS_LOCATION_TAG, MLFLOW_ARTIFACT_LOCATION):
                         cls._add_span_trace_tag(
                             root_tags, tag_key, cls._span_attribute_value(value)
                         )
 
         metadata = {}
-        session_id = attributes.get(SpanAttributeKey.SESSION_ID) or attributes.get(
-            GenAiSemconvKey.CONVERSATION_ID
+        session_id = attributes.get(SPAN_SESSION_ATTRIBUTE) or attributes.get(
+            CONVERSATION_ID_ATTRIBUTE
         )
         for key, value in (
             (TraceMetadataKey.TRACE_SESSION, session_id),
-            (TraceMetadataKey.TRACE_USER, attributes.get(SpanAttributeKey.USER_ID)),
+            (TraceMetadataKey.TRACE_USER, attributes.get(SPAN_USER_ATTRIBUTE)),
         ):
             if value is not None:
                 metadata[key] = str(cls._span_attribute_value(value))
@@ -1398,13 +1414,13 @@ class MongoDBTrackingStore(AbstractStore):
             "dimension_attributes": {
                 field: cls._span_attribute_value(attributes[attribute])
                 for field, attribute in (
-                    (SpanDimensionKey.MODEL, SpanAttributeKey.MODEL),
-                    (SpanDimensionKey.MODEL_PROVIDER, SpanAttributeKey.MODEL_PROVIDER),
+                    (SpanDimensionKey.MODEL, SPAN_MODEL_ATTRIBUTE),
+                    (SpanDimensionKey.MODEL_PROVIDER, SPAN_PROVIDER_ATTRIBUTE),
                 )
                 if attribute in attributes
             },
             "token_usage": cls._numeric_trace_stats(attributes.get(SpanAttributeKey.CHAT_USAGE)),
-            "cost": cls._numeric_trace_stats(attributes.get(SpanAttributeKey.LLM_COST)),
+            "cost": cls._numeric_trace_stats(attributes.get(SPAN_COST_ATTRIBUTE)),
             "trace_fields": {
                 "metadata": metadata,
                 "resource_tags": resource_tags,
@@ -1446,6 +1462,7 @@ class MongoDBTrackingStore(AbstractStore):
         else:
             state = TraceState.OK.value
 
+        token_usage, cost = aggregate_span_summaries(documents)
         return {
             "request_time": start_ms,
             "execution_duration": max(end_times) // 1_000_000 - start_ms if end_times else None,
@@ -1454,12 +1471,8 @@ class MongoDBTrackingStore(AbstractStore):
             "response_preview": root.trace_fields["response_preview"] if root else None,
             "tags": tags,
             "metadata": metadata,
-            "token_usage": aggregate_usage_from_span_nodes(
-                [SpanAggregationNode(d.span_id, d.parent_span_id, d.token_usage) for d in documents]
-            ),
-            "cost": aggregate_cost_from_span_nodes(
-                [SpanAggregationNode(d.span_id, d.parent_span_id, d.cost) for d in documents]
-            ),
+            "token_usage": token_usage,
+            "cost": cost,
         }
 
     @classmethod
@@ -1496,7 +1509,7 @@ class MongoDBTrackingStore(AbstractStore):
             key: json.dumps(summary[field])
             for field, key in (
                 ("token_usage", TraceMetadataKey.TOKEN_USAGE),
-                ("cost", TraceMetadataKey.COST),
+                ("cost", TRACE_COST_METADATA),
             )
             if summary[field] is not None
         }
@@ -1533,7 +1546,7 @@ class MongoDBTrackingStore(AbstractStore):
     def _validate_linked_prompt_filter(clause: SearchFilterClause) -> None:
         if (
             clause.field_type == "tag"
-            and clause.key == TraceTagKey.LINKED_PROMPTS
+            and clause.key == LINKED_PROMPTS_TAG_KEY
             and (clause.comparator != "=" or clause.value.count("/") != 1)
         ):
             raise RepositoryInvalidPromptFilterError("Invalid linked-prompt comparison.")
@@ -1543,7 +1556,7 @@ class MongoDBTrackingStore(AbstractStore):
         allowed = ("=", "!=", "IS NULL", "IS NOT NULL")
         if (
             clause.field_type == "request_metadata"
-            and clause.key in (TraceMetadataKey.TOKEN_USAGE, TraceMetadataKey.COST)
+            and clause.key in (TraceMetadataKey.TOKEN_USAGE, TRACE_COST_METADATA)
             and clause.comparator not in allowed
         ):
             raise RepositoryUnsupportedComparatorError(
@@ -1560,7 +1573,11 @@ class MongoDBTrackingStore(AbstractStore):
             comparators={
                 "attribute": SearchTraceUtils.VALID_STRING_ATTRIBUTE_COMPARATORS,
                 "tag": SearchTraceUtils.VALID_TAG_COMPARATORS,
-                "request_metadata": SearchTraceUtils.VALID_METADATA_COMPARATORS,
+                "request_metadata": getattr(
+                    SearchTraceUtils,
+                    "VALID_METADATA_COMPARATORS",
+                    SearchTraceUtils.VALID_TAG_COMPARATORS,
+                ),
             },
             field_comparators={
                 ("attribute", key): SearchTraceUtils.VALID_NUMERIC_ATTRIBUTE_COMPARATORS
@@ -1657,7 +1674,7 @@ class MongoDBTrackingStore(AbstractStore):
                 )
             if field_type == "request_metadata" and key in (
                 TraceMetadataKey.TOKEN_USAGE,
-                TraceMetadataKey.COST,
+                TRACE_COST_METADATA,
             ):
                 raise MlflowException.invalid_parameter_value(
                     f"Ordering by reserved metadata '{key}' is not supported."
@@ -1837,6 +1854,8 @@ class MongoDBTrackingStore(AbstractStore):
         max_results: int = MAX_RESULTS_QUERY_TRACE_METRICS,
         page_token: str | None = None,  # ruff: ignore[unused-method-argument]
     ) -> PagedList[MetricDataPoint]:
+        if not TRACE_METRICS_AVAILABLE:
+            raise MlflowNotImplementedException("Trace metric queries require MLflow 3.9 or newer.")
         # Its SQL models import MLflow clients, which are unavailable during discovery.
         from mlflow.store.tracking.utils.sql_trace_metrics_utils import (  # ruff: ignore[import-outside-top-level]
             validate_query_trace_metrics_params,

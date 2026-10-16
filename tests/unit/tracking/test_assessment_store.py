@@ -8,7 +8,6 @@ from mlflow.entities.assessment import (
     Expectation,
     ExpectationValue,
     FeedbackValue,
-    IssueReference,
 )
 from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import (
@@ -24,6 +23,12 @@ from mlflow_mongodb.infrastructure.errors import (
     RepositoryPersistenceError,
 )
 from mlflow_mongodb.tracking.store import MongoDBTrackingStore
+
+try:
+    from mlflow.entities.assessment import IssueReference
+except ImportError:
+    IssueReference = None
+
 
 TRACE_ID = "tr-0000000000000000000000000000002a"
 TIMESTAMP = 1_700_000_000_000
@@ -83,6 +88,7 @@ def test_expectation_conversion_preserves_validity_override_and_run_link():
     assert result.run_id == "run"
 
 
+@pytest.mark.skipif(IssueReference is None, reason="MLflow has no IssueReference entity")
 def test_issue_reference_conversion_preserves_native_content_and_run_link():
     assessment = IssueReference(
         issue_id="issue-1",
@@ -332,7 +338,10 @@ def test_update_feedback_error_is_preserved(assessment_store, trace_repository):
 def test_update_feedback_can_clear_existing_error(
     assessment_store, trace_repository, feedback_factory
 ):
-    existing = feedback_factory(value=None, error="judge failed")
+    existing = feedback_factory(
+        value=None,
+        error=AssessmentError(error_code="JUDGE_ERROR", error_message="judge failed"),
+    )
     trace_repository.get_assessment.return_value = assessment_store._assessment_to_document(
         existing
     )

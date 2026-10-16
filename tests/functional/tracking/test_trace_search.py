@@ -3,6 +3,7 @@
 import pytest
 from mlflow.entities import TraceState
 from mlflow.tracing.constant import TraceMetadataKey, TraceTagKey
+from mlflow.utils.search_utils import SearchTraceUtils
 
 
 @pytest.fixture
@@ -45,17 +46,66 @@ def searchable_traces(store, trace_info_factory):
     [
         ("status = 'ERROR'", ["b"]),
         ("status != 'ERROR'", ["a", "c"]),
-        ("client_request_id != 'other'", ["a"]),
+        pytest.param(
+            "client_request_id != 'other'",
+            ["a"],
+            marks=pytest.mark.skipif(
+                "client_request_id" not in SearchTraceUtils.VALID_SEARCH_ATTRIBUTE_KEYS,
+                reason="Installed MLflow has no client-request-ID filters",
+            ),
+        ),
         ("timestamp_ms >= 2000", ["b", "c"]),
-        ("end_time_ms >= 2010", ["b", "c"]),
+        pytest.param(
+            "end_time_ms >= 2010",
+            ["b", "c"],
+            marks=pytest.mark.skipif(
+                "end_time_ms" not in SearchTraceUtils.VALID_SEARCH_ATTRIBUTE_KEYS,
+                reason="Installed MLflow has no end-time filters",
+            ),
+        ),
         ("tags.`team.name` = '$risk'", ["a"]),
-        ("tags.`team.name` IS NULL", ["c"]),
-        ("tags.`team.name` IS NOT NULL", ["a", "b"]),
+        pytest.param(
+            "tags.`team.name` IS NULL",
+            ["c"],
+            marks=pytest.mark.skipif(
+                "IS NULL" not in SearchTraceUtils.VALID_TAG_COMPARATORS,
+                reason="Installed MLflow has no tag existence filters",
+            ),
+        ),
+        pytest.param(
+            "tags.`team.name` IS NOT NULL",
+            ["a", "b"],
+            marks=pytest.mark.skipif(
+                "IS NOT NULL" not in SearchTraceUtils.VALID_TAG_COMPARATORS,
+                reason="Installed MLflow has no tag existence filters",
+            ),
+        ),
         ("request_metadata.`session.key` = 'one'", ["a"]),
-        ("name ILIKE 'AL%'", ["a"]),
-        ("name RLIKE '^b.*a$'", ["b"]),
+        pytest.param(
+            "name ILIKE 'AL%'",
+            ["a"],
+            marks=pytest.mark.skipif(
+                "ILIKE" not in SearchTraceUtils.VALID_TAG_COMPARATORS,
+                reason="Installed MLflow has no ILIKE trace-name filters",
+            ),
+        ),
+        pytest.param(
+            "name RLIKE '^b.*a$'",
+            ["b"],
+            marks=pytest.mark.skipif(
+                "RLIKE" not in SearchTraceUtils.VALID_TAG_COMPARATORS,
+                reason="Installed MLflow has no RLIKE trace-name filters",
+            ),
+        ),
         ("run_id = 'run'", ["a", "b"]),
-        ("prompt = 'greeting/2'", ["a"]),
+        pytest.param(
+            "prompt = 'greeting/2'",
+            ["a"],
+            marks=pytest.mark.skipif(
+                "prompt" not in SearchTraceUtils.SEARCH_KEY_TO_TAG,
+                reason="Installed MLflow has no prompt search aliases",
+            ),
+        ),
         ("status = 'OK' AND tags.`team.name` = '$risk'", ["a"]),
     ],
 )
@@ -104,8 +154,22 @@ def test_custom_order_places_missing_values_last_and_keeps_pages_stable(store, s
 @pytest.mark.parametrize(
     "order,expected_indices",
     [
-        ("end_time_ms ASC", [3, 1, 2, 0]),
-        ("end_time_ms DESC", [0, 2, 3, 1]),
+        pytest.param(
+            "end_time_ms ASC",
+            [3, 1, 2, 0],
+            marks=pytest.mark.skipif(
+                "end_time_ms" not in SearchTraceUtils.VALID_ORDER_BY_ATTRIBUTE_KEYS,
+                reason="Installed MLflow has no end-time ordering",
+            ),
+        ),
+        pytest.param(
+            "end_time_ms DESC",
+            [0, 2, 3, 1],
+            marks=pytest.mark.skipif(
+                "end_time_ms" not in SearchTraceUtils.VALID_ORDER_BY_ATTRIBUTE_KEYS,
+                reason="Installed MLflow has no end-time ordering",
+            ),
+        ),
         ("execution_time_ms ASC", [3, 1, 0, 2]),
         ("execution_time_ms DESC", [0, 1, 3, 2]),
     ],

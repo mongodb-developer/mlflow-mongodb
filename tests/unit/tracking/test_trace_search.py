@@ -10,6 +10,10 @@ from mlflow.tracing.constant import TraceMetadataKey, TraceTagKey
 from mlflow.utils.search_utils import SearchTraceUtils
 
 from mlflow_mongodb.infrastructure.errors import RepositoryPersistenceError
+from mlflow_mongodb.tracking._compat import (  # ruff: ignore[import-private-name]
+    LINKED_PROMPTS_TAG_KEY,
+    TRACE_COST_METADATA,
+)
 from mlflow_mongodb.tracking.repositories.traces import (
     TraceRepository,
     TraceSearchFilter,
@@ -22,15 +26,26 @@ from mlflow_mongodb.tracking.repositories.traces import (
     [
         ("status = 'OK'", TraceSearchFilter("attribute", "status", "=", "OK")),
         ("timestamp_ms >= 1000", TraceSearchFilter("attribute", "timestamp_ms", ">=", 1000.0)),
-        ("tags.team LIKE 'Risk%'", TraceSearchFilter("tag", "team", "LIKE", "Risk%")),
+        pytest.param(
+            "tags.team LIKE 'Risk%'",
+            TraceSearchFilter("tag", "team", "LIKE", "Risk%"),
+            marks=pytest.mark.skipif(
+                "LIKE" not in SearchTraceUtils.VALID_TAG_COMPARATORS,
+                reason="Installed MLflow does not support LIKE in trace tags",
+            ),
+        ),
         ("name = 'agent'", TraceSearchFilter("tag", TraceTagKey.TRACE_NAME, "=", "agent")),
         (
             "run_id = 'run'",
             TraceSearchFilter("request_metadata", TraceMetadataKey.SOURCE_RUN, "=", "run"),
         ),
-        (
+        pytest.param(
             "prompt = 'greeting/1'",
-            TraceSearchFilter("tag", TraceTagKey.LINKED_PROMPTS, "=", "greeting/1"),
+            TraceSearchFilter("tag", LINKED_PROMPTS_TAG_KEY, "=", "greeting/1"),
+            marks=pytest.mark.skipif(
+                "prompt" not in SearchTraceUtils.SEARCH_KEY_TO_TAG,
+                reason="Installed MLflow has no prompt search alias",
+            ),
         ),
     ],
 )
@@ -50,8 +65,8 @@ def test_empty_filter_has_no_clauses(trace_store, expression):
         {"type": "attribute", "key": "unknown", "comparator": "=", "value": "x"},
         {"type": "tag", "key": "team", "comparator": ">", "value": "x"},
         {"type": "tag", "key": "team", "comparator": "RLIKE", "value": "["},
-        {"type": "tag", "key": TraceTagKey.LINKED_PROMPTS, "comparator": "!=", "value": "name/1"},
-        {"type": "tag", "key": TraceTagKey.LINKED_PROMPTS, "comparator": "=", "value": "name"},
+        {"type": "tag", "key": LINKED_PROMPTS_TAG_KEY, "comparator": "!=", "value": "name/1"},
+        {"type": "tag", "key": LINKED_PROMPTS_TAG_KEY, "comparator": "=", "value": "name"},
         {
             "type": "request_metadata",
             "key": TraceMetadataKey.TOKEN_USAGE,
@@ -92,10 +107,20 @@ def test_duplicate_order_fields_fail_before_repository_call(trace_store, trace_r
 @pytest.mark.parametrize(
     "order,field_type",
     [
-        ("span.name ASC", "span"),
-        ("feedback.quality ASC", "feedback"),
-        ("expectation.answer ASC", "expectation"),
-        ("issue.id ASC", "issue"),
+        pytest.param(
+            order,
+            field_type,
+            marks=pytest.mark.skipif(
+                field_type not in SearchTraceUtils._VALID_IDENTIFIERS,
+                reason="Installed MLflow rejects this identifier before store validation",
+            ),
+        )
+        for order, field_type in (
+            ("span.name ASC", "span"),
+            ("feedback.quality ASC", "feedback"),
+            ("expectation.answer ASC", "expectation"),
+            ("issue.id ASC", "issue"),
+        )
     ],
 )
 def test_unsupported_ordering_field_is_rejected_before_repository_call(
@@ -109,7 +134,7 @@ def test_unsupported_ordering_field_is_rejected_before_repository_call(
     trace_repository.search_trace_infos.assert_not_called()
 
 
-@pytest.mark.parametrize("key", [TraceMetadataKey.TOKEN_USAGE, TraceMetadataKey.COST])
+@pytest.mark.parametrize("key", [TraceMetadataKey.TOKEN_USAGE, TRACE_COST_METADATA])
 def test_reserved_metadata_ordering_is_rejected(trace_store, trace_repository, key):
     with pytest.raises(MlflowException, match="reserved metadata"):
         trace_store.search_traces(experiment_ids=["42"], order_by=[f"request_metadata.`{key}` ASC"])
@@ -234,7 +259,7 @@ def test_source_run_filter_matches_explicit_links_and_metadata():
 
 def test_prompt_filter_requires_name_and_version_from_same_reference():
     assert TraceRepository._search_filter_condition(
-        TraceSearchFilter("tag", TraceTagKey.LINKED_PROMPTS, "=", "greeting/2")
+        TraceSearchFilter("tag", LINKED_PROMPTS_TAG_KEY, "=", "greeting/2")
     ) == {"linked_prompts": {"$elemMatch": {"name": "greeting", "version": "2"}}}
 
 

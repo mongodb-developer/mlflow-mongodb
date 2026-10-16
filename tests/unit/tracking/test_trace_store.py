@@ -22,10 +22,8 @@ from mlflow.protos.databricks_pb2 import (
 from mlflow.tracing.constant import (
     TRACE_REQUEST_RESPONSE_PREVIEW_MAX_LENGTH_OSS,
     SpanAttributeKey,
-    SpansLocation,
     TraceMetadataKey,
     TraceSizeStatsKey,
-    TraceTagKey,
 )
 from opentelemetry.trace import StatusCode
 
@@ -34,6 +32,14 @@ from mlflow_mongodb.infrastructure.errors import (
     RepositoryNotFoundError,
     RepositoryPersistenceError,
     RepositoryWriteConflictError,
+)
+from mlflow_mongodb.tracking._compat import (  # ruff: ignore[import-private-name]
+    SPAN_COST_ATTRIBUTE,
+    SPAN_SESSION_ATTRIBUTE,
+    SPAN_TRACE_TAG_PREFIX,
+    SPANS_LOCATION,
+    SPANS_LOCATION_TAG,
+    TRACE_COST_METADATA,
 )
 from mlflow_mongodb.tracking.store import MongoDBTrackingStore
 from mlflow_mongodb.tracking.types import SpanSummaryRecord
@@ -51,12 +57,12 @@ def test_start_trace_normalizes_storage_fields_without_mutating_input(
         trace_location=TraceLocation.from_experiment_id("42"),
         request_time=TIMESTAMP,
         state=TraceState.OK,
-        tags={"team": "risk", TraceTagKey.SPANS_LOCATION: "artifact"},
+        tags={"team": "risk", SPANS_LOCATION_TAG: "artifact"},
         trace_metadata={
             TraceMetadataKey.SOURCE_RUN: "run",
             TraceMetadataKey.SIZE_STATS: json.dumps({TraceSizeStatsKey.NUM_SPANS: 2}),
             TraceMetadataKey.TOKEN_USAGE: '{"input_tokens": 4}',
-            TraceMetadataKey.COST: '{"total_cost": 0.2}',
+            TRACE_COST_METADATA: '{"total_cost": 0.2}',
         },
         assessments=[assessment],
     )
@@ -68,13 +74,13 @@ def test_start_trace_normalizes_storage_fields_without_mutating_input(
     assert arguments["experiment_id"] == "42"
     assert arguments["request_time"] == TIMESTAMP
     assert arguments["state"] == "OK"
-    assert arguments["tags"][TraceTagKey.SPANS_LOCATION] == SpansLocation.TRACKING_STORE.value
+    assert arguments["tags"][SPANS_LOCATION_TAG] == SPANS_LOCATION
     assert arguments["run_ids"] == ["run"]
     assert arguments["span_stats"] == {TraceSizeStatsKey.NUM_SPANS: 2}
     assert arguments["metrics"] == {"token_usage": {"input_tokens": 4}, "cost": {"total_cost": 0.2}}
     assert arguments["assessments"][0]["assessment_id"]
     assert assessment.assessment_id is None
-    assert info.tags[TraceTagKey.SPANS_LOCATION] == "artifact"
+    assert info.tags[SPANS_LOCATION_TAG] == "artifact"
     assert result.trace_id == TRACE_ID
 
 
@@ -458,9 +464,9 @@ def test_span_document_retains_encoded_payload_and_extracts_native_query_values(
     span = span_factory(
         attributes={
             SpanAttributeKey.CHAT_USAGE: {"input_tokens": 4},
-            SpanAttributeKey.LLM_COST: {"total_cost": 0.2},
-            SpanAttributeKey.SESSION_ID: "session",
-            SpanAttributeKey.TRACE_TAG_PREFIX + "team": "root",
+            SPAN_COST_ATTRIBUTE: {"total_cost": 0.2},
+            SPAN_SESSION_ATTRIBUTE: "session",
+            SPAN_TRACE_TAG_PREFIX + "team": "root",
         },
         resource_attributes={"team": "resource", "telemetry.sdk.name": "ignored"},
     )
@@ -492,7 +498,7 @@ def test_summary_uses_root_state_and_persisted_time_bounds(span_factory, parent_
 
 def test_summary_root_tags_override_resource_tags(span_factory):
     root = span_factory(
-        attributes={SpanAttributeKey.TRACE_TAG_PREFIX + "team": "root"},
+        attributes={SPAN_TRACE_TAG_PREFIX + "team": "root"},
         resource_attributes={"team": "resource"},
     )
     child = span_factory(span_id=2, parent_id=1, resource_attributes={"other": "value"})

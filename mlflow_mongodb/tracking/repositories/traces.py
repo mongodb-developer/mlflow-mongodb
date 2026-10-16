@@ -1,5 +1,7 @@
 """Persistence operations for traces, spans, and assessments."""
 
+from __future__ import annotations
+
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -8,28 +10,8 @@ from types import MappingProxyType
 from typing import Any, ClassVar, Final
 
 from bson.errors import BSONError
-from mlflow.entities.trace_metrics import (
-    AggregationType,
-    MetricAggregation,
-    MetricDataPoint,
-    MetricViewType,
-)
 from mlflow.entities.trace_state import TraceState
-from mlflow.tracing.constant import (
-    AssessmentMetricDimensionKey,
-    AssessmentMetricKey,
-    AssessmentMetricSearchKey,
-    SpanMetricDimensionKey,
-    SpanMetricKey,
-    SpanMetricSearchKey,
-    SpansLocation,
-    TraceMetadataKey,
-    TraceMetricDimensionKey,
-    TraceMetricKey,
-    TraceMetricSearchKey,
-    TraceTagKey,
-)
-from mlflow.utils.search_utils import SearchTraceMetricsUtils
+from mlflow.tracing.constant import TraceMetadataKey, TraceTagKey
 from pymongo import ASCENDING, DESCENDING, ReplaceOne, ReturnDocument, UpdateOne
 from pymongo.database import Database
 from pymongo.errors import (
@@ -53,12 +35,42 @@ from mlflow_mongodb.infrastructure.repository_operations import repository_opera
 from mlflow_mongodb.infrastructure.retry import retry_on_exception
 from mlflow_mongodb.infrastructure.search_filters import COMPARISON_OPERATORS, build_value_condition
 from mlflow_mongodb.infrastructure.settings import MongoDBSettings
+from mlflow_mongodb.tracking._compat import (
+    LINKED_PROMPTS_TAG_KEY,
+    SPANS_LOCATION,
+    SPANS_LOCATION_TAG,
+    TRACE_COST_METADATA,
+    TRACE_METRICS_AVAILABLE,
+)
 from mlflow_mongodb.tracking.types import (
     SpanDimensionKey,
     SpanRecord,
     SpanSummaryRecord,
     TraceRecord,
 )
+
+if TRACE_METRICS_AVAILABLE:
+    from mlflow.entities.trace_metrics import (
+        AggregationType,
+        MetricAggregation,
+        MetricDataPoint,
+        MetricViewType,
+    )
+    from mlflow.tracing.constant import (
+        AssessmentMetricDimensionKey,
+        AssessmentMetricKey,
+        AssessmentMetricSearchKey,
+        SpanMetricDimensionKey,
+        SpanMetricKey,
+        SpanMetricSearchKey,
+        TraceMetricDimensionKey,
+        TraceMetricKey,
+        TraceMetricSearchKey,
+    )
+    from mlflow.utils.search_utils import SearchTraceMetricsUtils
+
+    _SPAN_COST_METRIC_KEYS = getattr(SpanMetricKey, "cost_keys", tuple)()
+    _SESSION_COUNT_METRIC = getattr(TraceMetricKey, "SESSION_COUNT", None)
 
 
 @dataclass(frozen=True)
@@ -265,7 +277,7 @@ class TraceRepository:
             "trace_info_finalized": False,
             "authoritative_metadata_keys": [],
             "run_ids": [],
-            "tags": [{"k": TraceTagKey.SPANS_LOCATION, "v": SpansLocation.TRACKING_STORE.value}],
+            "tags": [{"k": SPANS_LOCATION_TAG, "v": SPANS_LOCATION}],
             "trace_metadata": [],
         }
 
@@ -466,7 +478,7 @@ class TraceRepository:
         metadata_updates = []
         for field, metadata_key in (
             ("token_usage", TraceMetadataKey.TOKEN_USAGE),
-            ("cost", TraceMetadataKey.COST),
+            ("cost", TRACE_COST_METADATA),
         ):
             if summary[field] is not None:
                 is_authoritative = {
@@ -606,7 +618,7 @@ class TraceRepository:
                 return {"$and": [{field: condition}, {field: {"$ne": None}}]}
             return {field: condition}
 
-        if item.field_type == "tag" and item.key == TraceTagKey.LINKED_PROMPTS:
+        if item.field_type == "tag" and item.key == LINKED_PROMPTS_TAG_KEY:
             name, version = item.value.split("/", 1)
             return {"linked_prompts": {"$elemMatch": {"name": name, "version": version}}}
         field = "tags" if item.field_type == "tag" else "trace_metadata"
@@ -765,6 +777,8 @@ class TraceRepository:
         max_results: int,
     ) -> list[MetricDataPoint]:
         """Aggregate metrics over trace, span, and assessment documents."""
+        if not TRACE_METRICS_AVAILABLE:
+            raise NotImplementedError("Trace metric queries require MLflow 3.9 or newer.")
         pipeline = self._build_trace_metrics_pipeline(
             experiment_ids=experiment_ids,
             view_type=view_type,
@@ -936,7 +950,7 @@ class TraceRepository:
                         ]
                     }
                 }
-            if metric_name in SpanMetricKey.cost_keys():
+            if metric_name in _SPAN_COST_METRIC_KEYS:
                 return f"$_metric_row.cost.{metric_name}"
         elif view_type == MetricViewType.ASSESSMENTS:
             if metric_name == AssessmentMetricKey.ASSESSMENT_VALUE:
@@ -966,12 +980,6 @@ class TraceRepository:
                 SpanMetricDimensionKey.SPAN_NAME: "$_metric_row.name",
                 SpanMetricDimensionKey.SPAN_TYPE: "$_metric_row.type",
                 SpanMetricDimensionKey.SPAN_STATUS: "$_metric_row.status",
-                SpanMetricDimensionKey.SPAN_MODEL_NAME: (
-                    f"$_metric_row.dimension_attributes.{SpanDimensionKey.MODEL}"
-                ),
-                SpanMetricDimensionKey.SPAN_MODEL_PROVIDER: (
-                    f"$_metric_row.dimension_attributes.{SpanDimensionKey.MODEL_PROVIDER}"
-                ),
             },
             MetricViewType.ASSESSMENTS: {
                 AssessmentMetricDimensionKey.ASSESSMENT_NAME: (
@@ -980,6 +988,14 @@ class TraceRepository:
                 AssessmentMetricDimensionKey.ASSESSMENT_VALUE: "$_assessment_value",
             },
         }
+        for name, field in (
+            ("SPAN_MODEL_NAME", SpanDimensionKey.MODEL),
+            ("SPAN_MODEL_PROVIDER", SpanDimensionKey.MODEL_PROVIDER),
+        ):
+            if key := getattr(SpanMetricDimensionKey, name, None):
+                expressions[MetricViewType.SPANS][key] = (
+                    f"$_metric_row.dimension_attributes.{field}"
+                )
         return expressions[view_type][dimension]
 
     @classmethod
@@ -1083,14 +1099,14 @@ class TraceRepository:
         if view_type == MetricViewType.TRACES:
             if TraceMetricDimensionKey.TRACE_NAME in (dimensions or []):
                 metric_match["tags"] = {"$elemMatch": {"k": TraceTagKey.TRACE_NAME}}
-            if metric_name == TraceMetricKey.SESSION_COUNT:
+            if metric_name == _SESSION_COUNT_METRIC:
                 metric_match["trace_metadata"] = {
                     "$elemMatch": {"k": TraceMetadataKey.TRACE_SESSION}
                 }
             elif metric_name in TraceMetricKey.token_usage_keys():
                 metric_match[f"token_usage.{metric_name}"] = {"$exists": True}
         elif view_type == MetricViewType.SPANS:
-            if metric_name in SpanMetricKey.cost_keys():
+            if metric_name in _SPAN_COST_METRIC_KEYS:
                 metric_match[f"_metric_row.cost.{metric_name}"] = {"$exists": True}
         if metric_match:
             pipeline.append({"$match": metric_match})
@@ -1119,7 +1135,7 @@ class TraceRepository:
         group = {"_id": group_keys or None}
         for index, aggregation in enumerate(aggregations):
             if aggregation.aggregation_type == AggregationType.COUNT:
-                if metric_name == TraceMetricKey.SESSION_COUNT:
+                if metric_name == _SESSION_COUNT_METRIC:
                     group["_sessions"] = {"$addToSet": {"$ifNull": ["$_session", "$$REMOVE"]}}
                 else:
                     group[f"agg_{index}"] = {"$sum": 1}
@@ -1139,7 +1155,7 @@ class TraceRepository:
         pipeline.append({"$group": group})
 
         calculated = {}
-        if metric_name == TraceMetricKey.SESSION_COUNT and view_type == MetricViewType.TRACES:
+        if metric_name == _SESSION_COUNT_METRIC and view_type == MetricViewType.TRACES:
             for index in range(len(aggregations)):
                 calculated[f"agg_{index}"] = {"$size": "$_sessions"}
         for index, aggregation in enumerate(aggregations):
@@ -1164,7 +1180,7 @@ class TraceRepository:
     ) -> list[dict[str, Any]]:
         """Build the temporary metric fields needed by each view before grouping."""
         if view_type == MetricViewType.TRACES:
-            if metric_name == TraceMetricKey.SESSION_COUNT:
+            if metric_name == _SESSION_COUNT_METRIC:
                 return [
                     {
                         "$set": {
