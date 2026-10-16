@@ -8,13 +8,13 @@ from mlflow.entities.model_registry import (
 )
 from mlflow.utils.search_utils import SearchModelVersionUtils
 
-from mlflow_mongodb import MongoDBModelRegistryStore
 from mlflow_mongodb.model_registry.repositories import (
     ModelVersionFilter,
     ModelVersionOrder,
     RegisteredModelFilter,
     RegisteredModelOrder,
 )
+from mlflow_mongodb.model_registry.store import MongoDBModelRegistryStore
 
 SUPPORTS_MODEL_NAME_LIST_FILTERS = "name" in getattr(
     SearchModelVersionUtils, "LIST_SUPPORTED_KEYS", ()
