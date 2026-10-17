@@ -6,6 +6,7 @@ import json
 import pytest
 from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import INVALID_PARAMETER_VALUE, ErrorCode
+from mlflow.store.tracking import SEARCH_MAX_RESULTS_THRESHOLD
 from mlflow.utils.search_utils import SearchLoggedModelsPaginationToken
 
 from mlflow_mongodb.infrastructure.errors import RepositoryInvalidAttributeError
@@ -155,6 +156,7 @@ def test_invalid_filter_values_are_rejected(
         {"max_results": True},
         {"max_results": -1},
         {"max_results": 1.5},
+        {"max_results": SEARCH_MAX_RESULTS_THRESHOLD + 1},
         {"filter_string": 1},
         {"order_by": "name"},
         {"order_by": [{}]},
@@ -177,6 +179,15 @@ def test_invalid_search_arguments_do_not_reach_repository(
         logged_model_store.search_logged_models(**arguments)
     assert caught.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
     logged_model_repository.search.assert_not_called()
+
+
+def test_search_accepts_max_results_at_upper_limit(logged_model_store, logged_model_repository):
+    logged_model_store.search_logged_models(["42"], max_results=SEARCH_MAX_RESULTS_THRESHOLD)
+
+    assert (
+        logged_model_repository.search.call_args.kwargs["max_results"]
+        == SEARCH_MAX_RESULTS_THRESHOLD
+    )
 
 
 def test_order_preserves_precedence_scope_and_default_tie_breakers(

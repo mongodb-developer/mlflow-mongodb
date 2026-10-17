@@ -1352,6 +1352,11 @@ class MongoDBTrackingStore(AbstractStore):
             raise MlflowException.invalid_parameter_value(
                 "`max_results` must be a positive integer."
             )
+        if max_results > SEARCH_MAX_RESULTS_THRESHOLD:
+            raise MlflowException.invalid_parameter_value(
+                f"Invalid value for request parameter max_results: it must be at most "
+                f"{SEARCH_MAX_RESULTS_THRESHOLD}, but got {max_results}"
+            )
         filters = self._parse_logged_model_filters(filter_string)
         orders = self._parse_logged_model_order(order_by)
         if not experiment_ids:
