@@ -3,11 +3,12 @@
 from unittest.mock import MagicMock, Mock, call
 
 import pytest
-from bson.errors import InvalidDocument
+from bson.errors import InvalidBSON, InvalidDocument
 from pymongo import ReturnDocument
 from pymongo.errors import BulkWriteError, DuplicateKeyError, OperationFailure
 
 from mlflow_mongodb.infrastructure.errors import (
+    RepositoryAlreadyExistsError,
     RepositoryNotFoundError,
     RepositoryPersistenceError,
     RepositoryWriteConflictError,
@@ -451,9 +452,133 @@ def test_deletion_failure_stops_cascade_without_deleting_metadata_early(
     )
 
 
+@pytest.mark.parametrize("error_type", [OperationFailure, InvalidBSON])
+def test_assessment_read_translates_driver_and_decode_errors(repository, collections, error_type):
+    error = error_type("Private read details")
+    collections["assessments"].find_one.side_effect = error
+    with pytest.raises(RepositoryPersistenceError) as caught:
+        repository.get_assessment(trace_id=TRACE_ID, assessment_id="a-one")
+    assert caught.value.__cause__ is error
+
+
+def test_assessment_missing_is_a_domain_error(repository, collections):
+    collections["assessments"].find_one.return_value = None
+    with pytest.raises(RepositoryNotFoundError) as caught:
+        repository.get_assessment(trace_id=TRACE_ID, assessment_id="a-one")
+    assert caught.value.args == ("a-one",)
+
+
+def test_malformed_assessment_response_is_not_a_database_error(repository, collections):
+    collections["assessments"].find_one.return_value = {"malformed": True}
+    with pytest.raises(KeyError, match="content"):
+        repository.get_assessment(trace_id=TRACE_ID, assessment_id="a-one")
+
+
 def test_empty_assessments_skip_bulk_write(repository, collections):
     assert (
         repository._upsert_assessments(trace_id=TRACE_ID, experiment_id="42", assessments=[])
         is None
     )
     collections["assessments"].bulk_write.assert_not_called()
+
+
+def test_duplicate_assessment_does_not_invalidate_original(repository, collections):
+    error = DuplicateKeyError("Private duplicate details")
+    collections["assessments"].insert_one.side_effect = error
+    with pytest.raises(RepositoryAlreadyExistsError) as caught:
+        repository.create_assessment(
+            trace_id=TRACE_ID,
+            experiment_id="42",
+            content={"assessment_id": "a-new", "overrides": "a-original"},
+        )
+    assert caught.value.__cause__ is error
+    collections["assessments"].update_one.assert_not_called()
+
+
+@pytest.mark.parametrize("error_type", [OperationFailure, InvalidDocument, OverflowError])
+def test_assessment_create_translates_write_errors(repository, collections, error_type):
+    error = error_type("Private assessment details")
+    collections["assessments"].insert_one.side_effect = error
+    with pytest.raises(RepositoryPersistenceError) as caught:
+        repository.create_assessment(
+            trace_id=TRACE_ID, experiment_id="42", content={"assessment_id": "a-new"}
+        )
+    assert caught.value.__cause__ is error
+
+
+def test_override_target_disappearing_after_insert_is_not_found(repository, collections):
+    collections["assessments"].update_one.return_value.matched_count = 0
+    with pytest.raises(RepositoryNotFoundError) as caught:
+        repository.create_assessment(
+            trace_id=TRACE_ID,
+            experiment_id="42",
+            content={"assessment_id": "a-new", "overrides": "a-original"},
+        )
+    assert caught.value.args == ("a-original",)
+    assert collections["assessments"].insert_one.call_count == 1
+
+
+def test_override_invalidation_failure_is_translated_without_claiming_rollback(
+    repository, collections
+):
+    error = OperationFailure("Private update details")
+    collection = collections["assessments"]
+    collection.update_one.side_effect = error
+    with pytest.raises(RepositoryPersistenceError) as caught:
+        repository.create_assessment(
+            trace_id=TRACE_ID,
+            experiment_id="42",
+            content={"assessment_id": "a-new", "overrides": "a-original"},
+        )
+    assert caught.value.__cause__ is error
+    assert collection.insert_one.call_count == 1
+    collection.delete_one.assert_not_called()
+
+
+def test_update_missing_assessment_is_not_found(repository, collections):
+    collections["assessments"].find_one_and_update.return_value = None
+    with pytest.raises(RepositoryNotFoundError):
+        repository.update_assessment(
+            trace_id=TRACE_ID, assessment_id="a-one", updates={"rationale": "new"}
+        )
+
+
+@pytest.mark.parametrize("error_type", [OperationFailure, InvalidDocument, OverflowError])
+def test_assessment_update_translates_write_errors(repository, collections, error_type):
+    error = error_type("Private update details")
+    collections["assessments"].find_one_and_update.side_effect = error
+    with pytest.raises(RepositoryPersistenceError) as caught:
+        repository.update_assessment(
+            trace_id=TRACE_ID, assessment_id="a-one", updates={"rationale": "new"}
+        )
+    assert caught.value.__cause__ is error
+
+
+def test_delete_missing_assessment_is_idempotent(repository, collections):
+    collection = collections["assessments"]
+    collection.find_one.return_value = None
+    assert repository.delete_assessment(trace_id=TRACE_ID, assessment_id="a-one") is None
+    collection.update_one.assert_not_called()
+    collection.delete_one.assert_not_called()
+
+
+def test_failed_override_restoration_does_not_delete_assessment(repository, collections):
+    collection = collections["assessments"]
+    collection.find_one.return_value = {"content": {"overrides": "a-original"}}
+    error = OperationFailure("Private restoration details")
+    collection.update_one.side_effect = error
+    with pytest.raises(RepositoryPersistenceError) as caught:
+        repository.delete_assessment(trace_id=TRACE_ID, assessment_id="a-new")
+    assert caught.value.__cause__ is error
+    collection.delete_one.assert_not_called()
+
+
+def test_delete_failure_after_restoration_is_translated(repository, collections):
+    collection = collections["assessments"]
+    collection.find_one.return_value = {"content": {"overrides": "a-original"}}
+    error = OperationFailure("Private delete details")
+    collection.delete_one.side_effect = error
+    with pytest.raises(RepositoryPersistenceError) as caught:
+        repository.delete_assessment(trace_id=TRACE_ID, assessment_id="a-new")
+    assert caught.value.__cause__ is error
+    assert collection.update_one.call_count == 1

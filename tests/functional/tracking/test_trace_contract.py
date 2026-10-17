@@ -7,12 +7,13 @@ from copy import deepcopy
 from threading import Barrier
 
 import pytest
-from mlflow.entities.assessment import Expectation
+from mlflow.entities.assessment import Expectation, Feedback
 from mlflow.entities.model_registry import PromptVersion
+from mlflow.entities.trace_location import TraceLocation
 from mlflow.entities.trace_state import TraceState
 from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import RESOURCE_DOES_NOT_EXIST, ErrorCode
-from mlflow.protos.service_pb2 import LinkTracesToRun
+from mlflow.protos.service_pb2 import DeleteTraces, LinkTracesToRun
 from mlflow.tracing.constant import (
     SpanAttributeKey,
     TraceMetadataKey,
@@ -212,6 +213,31 @@ def test_span_summary_preserves_authoritative_trace_fields(store, trace_info_fac
     assert document["cost"] == {"total_cost": 0.5}
 
 
+def test_batch_reads_restore_request_order_skip_missing_and_scope_experiments(
+    store, trace_info_factory, span_factory
+):
+    first, second = [store.start_trace(trace_info_factory()) for _ in range(2)]
+    other_experiment = store.create_experiment("other-traces")
+    unrelated = store.start_trace(
+        trace_info_factory(trace_location=TraceLocation.from_experiment_id(other_experiment))
+    )
+    for info in (first, second, unrelated):
+        store.log_spans(info.experiment_id, [span_factory(trace_id=info.trace_id)])
+    feedback = store.create_assessment(
+        Feedback(name="quality", value=True, trace_id=first.trace_id)
+    )
+    requested = [second.trace_id, "tr-missing", first.trace_id, second.trace_id, unrelated.trace_id]
+
+    infos = store.batch_get_trace_infos(requested, experiment_ids=[first.experiment_id])
+    traces = store.batch_get_traces(requested, experiment_ids=[first.experiment_id])
+
+    assert [info.trace_id for info in infos] == [second.trace_id, first.trace_id]
+    assert [trace.info.trace_id for trace in traces] == [second.trace_id, first.trace_id]
+    assert infos[1].assessments[0].assessment_id == feedback.assessment_id
+    assert traces[1].info.assessments == infos[1].assessments
+    assert len(traces[0].data.spans) == len(traces[1].data.spans) == 1
+
+
 def test_batch_complete_reads_omit_empty_and_partially_exported_traces(
     store, trace_info_factory, span_factory
 ):
@@ -302,3 +328,59 @@ def test_async_span_ingestion_persists_readable_trace(store, trace, span_factory
 
     assert result == [span]
     assert store.get_trace(trace.trace_id).data.spans[0].span_id == span.span_id
+
+
+@pytest.mark.parametrize("max_traces,remaining", [(None, [3000]), (1, [2000, 3000])])
+def test_timestamp_deletion_cascades_to_children_and_respects_count_limit(
+    store, trace_info_factory, span_factory, max_traces, remaining
+):
+    infos = [
+        store.start_trace(trace_info_factory(request_time=value)) for value in (1000, 2000, 3000)
+    ]
+    for info in infos:
+        store.log_spans(info.experiment_id, [span_factory(trace_id=info.trace_id)])
+        store.create_assessment(Feedback(name="quality", value=True, trace_id=info.trace_id))
+
+    count = store.delete_traces(
+        infos[0].experiment_id, max_timestamp_millis=2000, max_traces=max_traces
+    )
+
+    assert count == 3 - len(remaining)
+    kept = store.batch_get_trace_infos([info.trace_id for info in infos])
+    assert [info.request_time for info in kept] == remaining
+    repository = store._trace_repository
+    assert repository._spans_collection.count_documents({}) == len(remaining)
+    assert repository._assessments_collection.count_documents({}) == len(remaining)
+    assert store.delete_traces(infos[0].experiment_id, trace_ids=["tr-missing"]) == 0
+
+
+def test_id_deletion_scopes_ownership_and_cascades_only_selected_trace(
+    store, trace_info_factory, span_factory
+):
+    selected = store.start_trace(trace_info_factory())
+    other_experiment = store.create_experiment("other-delete")
+    other = store.start_trace(
+        trace_info_factory(trace_location=TraceLocation.from_experiment_id(other_experiment))
+    )
+    for info in (selected, other):
+        store.log_spans(info.experiment_id, [span_factory(trace_id=info.trace_id)])
+        store.create_assessment(Feedback(name="quality", value=True, trace_id=info.trace_id))
+
+    request = DeleteTraces(
+        experiment_id=selected.experiment_id,
+        request_ids=[selected.trace_id, other.trace_id],
+    )
+
+    assert store.delete_traces(request.experiment_id, trace_ids=request.request_ids) == 1
+
+    assert store.get_trace(other.trace_id).info.assessments
+    with pytest.raises(MlflowException) as caught:
+        store.get_trace_info(selected.trace_id)
+    assert caught.value.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST)
+    repository = store._trace_repository
+    assert repository._spans_collection.count_documents({"trace_id": selected.trace_id}) == 0
+    assert repository._assessments_collection.count_documents({"trace_id": selected.trace_id}) == 0
+    assert repository._collection.count_documents({"_id": other.trace_id}) == 1
+    assert repository._spans_collection.count_documents({"trace_id": other.trace_id}) == 1
+    assert repository._assessments_collection.count_documents({"trace_id": other.trace_id}) == 1
+    assert list(request.request_ids) == [selected.trace_id, other.trace_id]

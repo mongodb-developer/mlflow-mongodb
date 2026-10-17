@@ -10,7 +10,7 @@ import math
 from collections import defaultdict
 from copy import deepcopy
 from functools import cached_property
-from typing import Any
+from typing import Any, NoReturn
 from uuid import uuid4
 
 from mlflow.entities import (
@@ -40,6 +40,7 @@ from mlflow.entities import (
     TraceState,
     ViewType,
 )
+from mlflow.entities.assessment import Expectation, ExpectationValue, Feedback, FeedbackValue
 from mlflow.entities.logged_model_parameter import LoggedModelParameter
 from mlflow.entities.logged_model_status import LoggedModelStatus
 from mlflow.entities.logged_model_tag import LoggedModelTag
@@ -49,6 +50,7 @@ from mlflow.entities.span_status import SpanStatusCode
 from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import (
     BAD_REQUEST,
+    INTERNAL_ERROR,
     INVALID_PARAMETER_VALUE,
     INVALID_STATE,
     RESOURCE_ALREADY_EXISTS,
@@ -68,6 +70,7 @@ from mlflow.tracing.constant import (
     TraceMetadataKey,
     TraceSizeStatsKey,
 )
+from mlflow.tracing.utils import generate_assessment_id
 from mlflow.tracing.utils.truncation import _get_truncated_preview
 from mlflow.tracking.default_experiment import DEFAULT_EXPERIMENT_ID
 from mlflow.utils.mlflow_tags import (
@@ -1548,6 +1551,130 @@ class MongoDBTrackingStore(AbstractStore):
         assessment.overrides = document.get("overrides")
         assessment.run_id = document.get("run_id", assessment.run_id)
         return assessment
+
+    def _raise_assessment_not_found(
+        self, trace_id: str, assessment_id: str, exc: RepositoryNotFoundError
+    ) -> NoReturn:
+        # Match MLflow's distinction between a missing trace and a missing assessment.
+        self._get_trace_record(trace_id)
+        logger.error("Unable to find assessment: %s", exc)
+        raise MlflowException(
+            f"Assessment with ID '{assessment_id}' not found for trace '{trace_id}'",
+            RESOURCE_DOES_NOT_EXIST,
+        ) from None
+
+    @handle_persistence_error("Unable to read assessment.", logger=logger)
+    def get_assessment(self, trace_id: str, assessment_id: str) -> Assessment:
+        try:
+            document = self._trace_repository.get_assessment(
+                trace_id=trace_id, assessment_id=assessment_id
+            )
+        except RepositoryNotFoundError as exc:
+            self._raise_assessment_not_found(trace_id, assessment_id, exc)
+        return self._assessment_from_document(document)
+
+    @handle_persistence_error("Unable to create assessment.", logger=logger)
+    def create_assessment(self, assessment: Assessment) -> Assessment:
+        trace = self._get_trace_record(assessment.trace_id)
+        if assessment.overrides:
+            self.get_assessment(assessment.trace_id, assessment.overrides)
+        if assessment.assessment_id is None:
+            assessment.assessment_id = generate_assessment_id()
+        created = deepcopy(assessment)
+        created.valid = True
+        now = get_current_time_millis()
+        created.create_time_ms = created.create_time_ms or now
+        created.last_update_time_ms = created.last_update_time_ms or now
+        document = self._assessment_to_document(created)
+        try:
+            document = self._trace_repository.create_assessment(
+                trace_id=trace.trace_id,
+                experiment_id=trace.experiment_id,
+                content=document,
+            )
+        except RepositoryAlreadyExistsError as exc:
+            logger.error("Unable to create assessment: %s", exc)
+            raise MlflowException(
+                "Unable to create assessment due to an identity conflict.", INTERNAL_ERROR
+            ) from None
+        except RepositoryNotFoundError as exc:
+            self._raise_assessment_not_found(trace.trace_id, created.overrides, exc)
+        return self._assessment_from_document(document)
+
+    @handle_persistence_error("Unable to update assessment.", logger=logger)
+    def update_assessment(
+        self,
+        trace_id: str,
+        assessment_id: str,
+        name: str | None = None,
+        expectation: ExpectationValue | Expectation | None = None,
+        feedback: FeedbackValue | Feedback | None = None,
+        rationale: str | None = None,
+        metadata: dict[str, str] | None = None,
+    ) -> Assessment:
+        existing = self.get_assessment(trace_id, assessment_id)
+        if expectation is not None and feedback is not None:
+            raise MlflowException.invalid_parameter_value(
+                "Cannot specify both `expectation` and `feedback` parameters."
+            )
+        if expectation is not None and existing.expectation is None:
+            raise MlflowException.invalid_parameter_value(
+                "Cannot update expectation value on a Feedback assessment."
+            )
+        if feedback is not None and existing.feedback is None:
+            raise MlflowException.invalid_parameter_value(
+                "Cannot update feedback value on an Expectation assessment."
+            )
+        # HTTP handlers may pass complete entities instead of their value objects.
+        if isinstance(expectation, Expectation):
+            expectation = expectation.expectation
+        if isinstance(feedback, Feedback):
+            feedback = feedback.feedback
+        if expectation is not None and not isinstance(expectation, ExpectationValue):
+            raise MlflowException.invalid_parameter_value(
+                "expectation must be an ExpectationValue."
+            )
+        if feedback is not None and not isinstance(feedback, FeedbackValue):
+            raise MlflowException.invalid_parameter_value("feedback must be a FeedbackValue.")
+        updated = deepcopy(existing)
+        updated.last_update_time_ms = get_current_time_millis()
+        if name is not None:
+            updated.name = name
+        if expectation is not None:
+            updated.expectation = expectation
+        if feedback is not None:
+            updated.feedback = feedback
+            updated.error = feedback.error
+        if rationale is not None:
+            updated.rationale = rationale
+        if metadata is not None:
+            updated.metadata = {**(existing.metadata or {}), **metadata}
+        document = self._assessment_to_document(updated)
+        updates = {"last_update_time": document["last_update_time"]}
+        for key, value in (
+            ("expectation", expectation),
+            ("feedback", feedback),
+        ):
+            if value is not None:
+                updates[key] = document[key]
+        if name is not None:
+            updates["assessment_name"] = name
+        if rationale is not None:
+            updates["rationale"] = rationale
+        if metadata is not None:
+            updates["metadata"] = metadata
+        try:
+            document = self._trace_repository.update_assessment(
+                trace_id=trace_id, assessment_id=assessment_id, updates=updates
+            )
+        except RepositoryNotFoundError as exc:
+            self._raise_assessment_not_found(trace_id, assessment_id, exc)
+        return self._assessment_from_document(document)
+
+    @handle_persistence_error("Unable to delete assessment.", logger=logger)
+    def delete_assessment(self, trace_id: str, assessment_id: str) -> None:
+        self._get_trace_record(trace_id)
+        self._trace_repository.delete_assessment(trace_id=trace_id, assessment_id=assessment_id)
 
     # Logged models
 
