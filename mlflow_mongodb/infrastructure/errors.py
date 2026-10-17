@@ -91,3 +91,11 @@ class RepositoryParamConflictError(Exception):
 
 class RepositoryTagNotFoundError(Exception):
     """Raised when a requested tag is missing from an existing resource."""
+
+
+class RepositoryWriteConflictError(Exception):
+    """Raised when a concurrent write invalidates the state required for an update."""
+
+    def __init__(self, resource_id: str):
+        super().__init__(resource_id)
+        self.resource_id = resource_id

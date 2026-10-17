@@ -1,3 +1,5 @@
+import pytest
+
 from mlflow_mongodb.tracking.repositories import ExperimentRepository, RunRepository
 from mlflow_mongodb.tracking.store import MongoDBTrackingStore
 
@@ -75,3 +77,66 @@ def test_logged_model_repository_indexes(mongodb_store: MongoDBTrackingStore):
     }.items():
         assert metric_indexes[name]["key"] == keys
         assert not metric_indexes[name].get("unique", False)
+
+
+@pytest.mark.parametrize(
+    "collection_setting,expected",
+    [
+        (
+            "traces_collection_name",
+            {
+                "traces_experiment_request_time_id": {
+                    "key": [("experiment_id", 1), ("request_time", 1), ("_id", 1)],
+                    "unique": False,
+                },
+                "traces_experiment_request_time_desc_id": {
+                    "key": [("experiment_id", 1), ("request_time", -1), ("_id", 1)],
+                    "unique": False,
+                },
+                "traces_experiment_run_ids_request_time": {
+                    "key": [("experiment_id", 1), ("run_ids", 1), ("request_time", 1)],
+                    "unique": False,
+                },
+                "traces_linked_prompts_name_version": {
+                    "key": [("linked_prompts.name", 1), ("linked_prompts.version", 1)],
+                    "unique": False,
+                },
+            },
+        ),
+        (
+            "spans_collection_name",
+            {
+                "spans_trace_span_unique": {
+                    "key": [("trace_id", 1), ("span_id", 1)],
+                    "unique": True,
+                },
+                "spans_trace_start_time": {
+                    "key": [("trace_id", 1), ("start_time_ns", 1)],
+                    "unique": False,
+                },
+            },
+        ),
+        (
+            "assessments_collection_name",
+            {
+                "assessments_trace_assessment_unique": {
+                    "key": [("trace_id", 1), ("assessment_id", 1)],
+                    "unique": True,
+                },
+                "assessments_experiment_assessment": {
+                    "key": [("experiment_id", 1), ("assessment_id", 1)],
+                    "unique": False,
+                },
+            },
+        ),
+    ],
+)
+def test_trace_repository_indexes(mongodb_store, collection_setting, expected):
+    collection_name = getattr(mongodb_store._settings, collection_setting)
+    indexes = {
+        index["name"]: {"key": list(index["key"].items()), "unique": index.get("unique", False)}
+        for index in mongodb_store._database[collection_name].list_indexes()
+        if index["name"] != "_id_"
+    }
+
+    assert indexes == expected

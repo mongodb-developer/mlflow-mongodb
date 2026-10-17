@@ -9,6 +9,7 @@ from mlflow_mongodb.tracking.repositories.logged_models import (
     LoggedModelSearchResult,
 )
 from mlflow_mongodb.tracking.repositories.runs import RunRepository
+from mlflow_mongodb.tracking.repositories.traces import TraceRepository
 
 __all__ = [
     "ExperimentRepository",
@@ -18,4 +19,5 @@ __all__ = [
     "LoggedModelRepository",
     "LoggedModelSearchResult",
     "RunRepository",
+    "TraceRepository",
 ]

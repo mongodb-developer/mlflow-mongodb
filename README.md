@@ -51,6 +51,11 @@ provided using standard MongoDB URI syntax. For example:
 mongodb://username:password@mongo.example.com:27017/mlflow_registry?authSource=admin
 ```
 
+When using the MongoDB tracking backend, MLflow 3.5 clients upload full trace payloads to
+MLflow's existing artifact storage. Configure a reachable experiment artifact location,
+such as S3 or an MLflow artifact proxy. The MongoDB store returns the trace artifact URI;
+it does not implement its own artifact provider or upload the payload itself.
+
 ## Documentation
 
 New to MLflow? Start with the [MLflow Tracking Quickstart](https://mlflow.org/docs/latest/ml/getting-started/quickstart/).
