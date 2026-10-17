@@ -140,6 +140,29 @@ def test_get_collects_history_across_runs_and_preserves_metric_identity(store, r
     assert "key" not in document and "value" not in document
 
 
+def test_repeated_delete_preserves_data_and_refreshes_timestamp(store, run, clock):
+    model = store.create_logged_model(
+        run.info.experiment_id,
+        name="model",
+        tags=[LoggedModelTag("team", "risk")],
+        params=[LoggedModelParameter("depth", "3")],
+    )
+    store.log_metric(run.info.run_id, Metric("loss", 5.0, 1000, 0, model_id=model.model_id))
+    original = _stored_model(store, model.model_id)
+    for advance in (0, 0, 10):
+        clock["now"] += advance
+        store.delete_logged_model(model.model_id)
+        stored = _stored_model(store, model.model_id)
+        assert stored["lifecycle_stage"] == LifecycleStage.DELETED
+        assert stored["last_updated_timestamp"] == clock["now"]
+        assert stored["tags"] == original["tags"] and stored["params"] == original["params"]
+    with pytest.raises(MlflowException) as caught:
+        store.get_logged_model(model.model_id)
+    assert caught.value.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST)
+    assert store.get_logged_model(model.model_id, allow_deleted=True).metrics[0].value == 5
+    assert store.search_logged_models([run.info.experiment_id]) == []
+
+
 @pytest.mark.parametrize("deleted", [False, True])
 def test_tag_mutation_handles_literals_duplicates_empty_batches_and_deleted_models(
     store, run, deleted

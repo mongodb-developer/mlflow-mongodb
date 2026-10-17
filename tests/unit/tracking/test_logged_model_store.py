@@ -11,6 +11,7 @@ from mlflow.entities.logged_model_tag import LoggedModelTag
 from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import (
     BAD_REQUEST,
+    INTERNAL_ERROR,
     INVALID_PARAMETER_VALUE,
     RESOURCE_DOES_NOT_EXIST,
     ErrorCode,
@@ -19,6 +20,7 @@ from mlflow.protos.databricks_pb2 import (
 import mlflow_mongodb.tracking.store as tracking_store
 from mlflow_mongodb.infrastructure.errors import (
     RepositoryNotFoundError,
+    RepositoryPersistenceError,
     RepositoryTagNotFoundError,
 )
 from mlflow_mongodb.tracking.types import RunMetricRecord
@@ -225,6 +227,73 @@ def test_domain_errors_keep_public_code_and_suppress_backend_context(
     assert caught.value.__suppress_context__ is True
     assert caplog.records[-1].args == (error,)
     assert caplog.records[-1].exc_info is None
+
+
+@pytest.mark.parametrize(
+    "operation,args,method,message",
+    [
+        (
+            "create_logged_model",
+            ("42", "example-model"),
+            "create",
+            "Unable to create logged model.",
+        ),
+        ("get_logged_model", (MODEL_ID,), "find_by_id", "Unable to get logged model."),
+        ("get_logged_model", (MODEL_ID,), "get_metric_history", "Unable to get logged model."),
+        ("delete_logged_model", (MODEL_ID,), "mark_deleted", "Unable to delete logged model."),
+        ("set_logged_model_tags", (MODEL_ID, []), "set_tags", "Unable to set logged model tags."),
+        (
+            "delete_logged_model_tag",
+            (MODEL_ID, "team"),
+            "delete_tag",
+            "Unable to delete logged model tag.",
+        ),
+        ("search_logged_models", (["42"],), "search", "Unable to search logged models."),
+    ],
+)
+def test_persistence_errors_are_sanitized_and_logged_once(
+    logged_model_store, logged_model_repository, caplog, operation, args, method, message
+):
+    error = RepositoryPersistenceError("Private URI and query")
+    getattr(logged_model_repository, method).side_effect = error
+    with pytest.raises(MlflowException) as caught:
+        getattr(logged_model_store, operation)(*args)
+    assert caught.value.message == message
+    assert caught.value.error_code == ErrorCode.Name(INTERNAL_ERROR)
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True
+    records = [r for r in caplog.records if r.name == tracking_store.logger.name]
+    assert len(records) == 1
+    assert records[0].args == (error,)
+    assert records[0].exc_info is None
+
+
+@pytest.mark.parametrize(
+    "operation,args",
+    [
+        ("create_logged_model", ("42", "example-model")),
+        ("get_logged_model", (MODEL_ID,)),
+        ("delete_logged_model", (MODEL_ID,)),
+        ("set_logged_model_tags", (MODEL_ID, [])),
+        ("delete_logged_model_tag", (MODEL_ID, "team")),
+        ("search_logged_models", (["42"],)),
+    ],
+)
+def test_initialization_failure_is_logged_once(
+    logged_model_store, monkeypatch, caplog, operation, args
+):
+    logged_model_store.__dict__.pop("_logged_model_repository")
+    logged_model_store.__dict__["_database"] = MagicMock()
+    error = RepositoryPersistenceError("Private initialization details")
+    monkeypatch.setattr(tracking_store, "LoggedModelRepository", Mock(side_effect=error))
+    with pytest.raises(MlflowException) as caught:
+        getattr(logged_model_store, operation)(*args)
+    assert caught.value.message == "Unable to initialize logged model repository."
+    assert caught.value.error_code == ErrorCode.Name(INTERNAL_ERROR)
+    assert caught.value.__cause__ is None
+    records = [r for r in caplog.records if r.name == tracking_store.logger.name]
+    assert len(records) == 1
+    assert records[0].args == (error,)
 
 
 def test_repository_initialization_is_cached(

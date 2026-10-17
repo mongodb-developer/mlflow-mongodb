@@ -15,7 +15,7 @@ from mlflow_mongodb.infrastructure.errors import (
     RepositoryTagNotFoundError,
 )
 from mlflow_mongodb.infrastructure.settings import MongoDBSettings
-from mlflow_mongodb.tracking.repositories import LoggedModelRepository
+from mlflow_mongodb.tracking.repositories import LoggedModelOrder, LoggedModelRepository
 
 MODEL_ID = "m-" + "a" * 32
 CREATE_ARGS = {
@@ -44,6 +44,19 @@ def repository(collections, logged_model_document_factory):
     database.__getitem__.side_effect = collections.__getitem__
     collections["logged_models"].find_one.return_value = logged_model_document_factory(_id=MODEL_ID)
     return LoggedModelRepository(database)
+
+
+def _search(repository, **overrides):
+    arguments = {
+        "experiment_ids": ["42"],
+        "filters": (),
+        "datasets": [],
+        "order_by": (LoggedModelOrder("attribute", "model_id", True),),
+        "offset": 0,
+        "max_results": 2,
+    }
+    arguments.update(overrides)
+    return repository.search(**arguments)
 
 
 def _cursor(documents):
@@ -222,6 +235,25 @@ def test_delete_existing_tag_succeeds(repository, collections):
 
 
 @pytest.mark.parametrize("error_type", [OperationFailure, InvalidBSON])
+def test_search_partial_cursor_failures_are_translated_and_cursor_closed(
+    repository, collections, error_type
+):
+    failure = error_type("Private deferred cursor details")
+
+    def documents():
+        yield {}
+        raise failure
+
+    cursor = _cursor([])
+    cursor.__iter__.side_effect = documents
+    collections["logged_models"].aggregate.return_value = cursor
+    with pytest.raises(RepositoryPersistenceError) as caught:
+        _search(repository)
+    assert caught.value.__cause__ is failure
+    cursor.__exit__.assert_called_once()
+
+
+@pytest.mark.parametrize("error_type", [OperationFailure, InvalidBSON])
 def test_metric_history_partial_cursor_failures_are_translated_and_cursor_closed(
     repository, collections, error_type
 ):
@@ -241,6 +273,15 @@ def test_metric_history_partial_cursor_failures_are_translated_and_cursor_closed
 
 
 @pytest.mark.parametrize("error_type", [OperationFailure, InvalidDocument])
+def test_search_cursor_creation_failures_are_translated(repository, collections, error_type):
+    failure = error_type("Private query details")
+    collections["logged_models"].aggregate.side_effect = failure
+    with pytest.raises(RepositoryPersistenceError) as caught:
+        _search(repository)
+    assert caught.value.__cause__ is failure
+
+
+@pytest.mark.parametrize("error_type", [OperationFailure, InvalidDocument])
 def test_metric_history_cursor_creation_failures_are_translated(
     repository, collections, error_type
 ):
@@ -249,6 +290,60 @@ def test_metric_history_cursor_creation_failures_are_translated(
     with pytest.raises(RepositoryPersistenceError) as caught:
         repository.get_metric_history(MODEL_ID)
     assert caught.value.__cause__ is failure
+
+
+def test_search_batches_history_for_page_only(
+    repository, collections, logged_model_document_factory
+):
+    ids = [MODEL_ID, "m-second", "m-lookahead"]
+    documents = [logged_model_document_factory(_id=model_id) for model_id in ids]
+    collections["logged_models"].aggregate.return_value = _cursor(documents)
+    collections["run_metrics"].find.return_value = _cursor(
+        [
+            {
+                "model_id": MODEL_ID,
+                "run_id": "run",
+                "k": "loss",
+                "v": 0.4,
+                "timestamp": 1000,
+                "step": 1,
+                "dataset_name": "eval",
+                "dataset_digest": "abc",
+            }
+        ]
+    )
+
+    page = _search(repository)
+
+    assert page.has_more is True
+    assert [item.model.model_id for item in page.records] == ids[:2]
+    assert page.records[0].metrics[0].key == "loss"
+    assert page.records[0].metrics[0].dataset_digest == "abc"
+    assert page.records[1].metrics == ()
+    assert collections["run_metrics"].find.call_args.args[0] == {"model_id": {"$in": ids[:2]}}
+    assert documents[0]["params"] == [{"k": "depth", "v": "3"}]
+
+
+def test_empty_search_avoids_metric_query(repository, collections):
+    collections["logged_models"].aggregate.return_value = _cursor([])
+    page = _search(repository)
+    assert page.records == () and not page.has_more
+    collections["run_metrics"].find.assert_not_called()
+
+
+def test_no_experiments_avoids_database_calls(repository, collections):
+    assert _search(repository, experiment_ids=[]).records == ()
+    collections["logged_models"].aggregate.assert_not_called()
+    collections["run_metrics"].find.assert_not_called()
+
+
+def test_search_conversion_failure_still_closes_cursor(repository, collections):
+    cursor = _cursor([{"_id": MODEL_ID}])
+    collections["logged_models"].aggregate.return_value = cursor
+    collections["run_metrics"].find.return_value = _cursor([])
+    with pytest.raises(KeyError):
+        _search(repository)
+    cursor.__exit__.assert_called_once()
 
 
 def test_metric_history_conversion_is_outside_boundary_and_cursor_is_closed(

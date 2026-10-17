@@ -7,6 +7,7 @@ from mlflow.entities import LifecycleStage
 
 from mlflow_mongodb.tracking.repositories import (
     ExperimentRepository,
+    LoggedModelPage,
     LoggedModelRepository,
     RunRepository,
 )
@@ -176,4 +177,5 @@ def logged_model_store(
     logged_model_repository.create.return_value = logged_model_record_factory()
     logged_model_repository.find_by_id.return_value = logged_model_record_factory()
     logged_model_repository.get_metric_history.return_value = ()
+    logged_model_repository.search.return_value = LoggedModelPage((), False)
     return store
