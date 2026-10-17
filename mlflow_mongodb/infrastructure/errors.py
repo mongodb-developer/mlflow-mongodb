@@ -103,3 +103,7 @@ class RepositoryWriteConflictError(Exception):
     def __init__(self, resource_id: str | None):
         super().__init__(resource_id)
         self.resource_id = resource_id
+
+
+class RepositoryInvalidPromptFilterError(Exception):
+    """Raised when a linked-prompt filter is not an exact name/version comparison."""
