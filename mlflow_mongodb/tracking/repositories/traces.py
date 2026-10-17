@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, ClassVar
 
 from bson.errors import BSONError
 from mlflow.entities.trace_state import TraceState
@@ -17,6 +18,7 @@ from pymongo.errors import (
 )
 
 from mlflow_mongodb.infrastructure.array_operations import (
+    build_array_value_expression,
     build_merge_array_expression,
     build_remove_array_element_update,
 )
@@ -28,8 +30,10 @@ from mlflow_mongodb.infrastructure.errors import (
 )
 from mlflow_mongodb.infrastructure.repository_operations import repository_operation
 from mlflow_mongodb.infrastructure.retry import retry_on_exception
+from mlflow_mongodb.infrastructure.search_filters import COMPARISON_OPERATORS, build_value_condition
 from mlflow_mongodb.infrastructure.settings import MongoDBSettings
 from mlflow_mongodb.tracking._compat import (
+    LINKED_PROMPTS_TAG_KEY,
     SPANS_LOCATION,
     SPANS_LOCATION_TAG,
     TRACE_COST_METADATA,
@@ -41,8 +45,32 @@ from mlflow_mongodb.tracking.types import (
 )
 
 
+@dataclass(frozen=True)
+class TraceSearchFilter:
+    field_type: str
+    key: str
+    operator: str
+    value: Any
+
+
+@dataclass(frozen=True)
+class TraceSearchOrder:
+    field_type: str
+    key: str
+    ascending: bool
+
+
 class TraceRepository:
     """Own trace metadata and the separate span and assessment collections."""
+
+    SEARCH_ATTRIBUTE_FIELDS: ClassVar[dict[str, str]] = {
+        "request_id": "_id",
+        "experiment_id": "experiment_id",
+        "timestamp_ms": "request_time",
+        "execution_time_ms": "execution_duration",
+        "status": "state",
+        "client_request_id": "client_request_id",
+    }
 
     def __init__(self, database: Database, settings: MongoDBSettings | None = None):
         self._settings = settings or MongoDBSettings()
@@ -511,6 +539,139 @@ class TraceRepository:
                 trace_ids, experiment_ids=experiment_ids, include_spans=False
             )
         ]
+
+    def search_trace_infos(
+        self,
+        *,
+        experiment_ids: list[str] | None,
+        filters: list[TraceSearchFilter],
+        order_by: list[TraceSearchOrder],
+        offset: int,
+        limit: int,
+    ) -> list[TraceRecord]:
+        """Select trace metadata after scoped filtering, sorting, and pagination."""
+        # TODO: Support span and assessment filters in search_trace_infos.
+        clauses: list[dict[str, Any]] = []
+        if experiment_ids is not None:
+            if not experiment_ids:
+                return []
+            clauses.append({"experiment_id": {"$in": experiment_ids}})
+        direct_filters = [
+            item for item in filters if item.field_type in ("attribute", "tag", "request_metadata")
+        ]
+        clauses.extend(self._search_filter_condition(item) for item in direct_filters)
+
+        pipeline: list[dict[str, Any]] = []
+        if clauses:
+            pipeline.append({"$match": {"$and": clauses}})
+        pipeline.extend(self._search_order_stages(order_by))
+        pipeline.extend([{"$skip": offset}, {"$limit": limit}])
+        pipeline.append({"$project": {"_id": 1}})
+
+        with (
+            repository_operation("Unable to search trace metadata."),
+            self._collection.aggregate(pipeline, allowDiskUse=True) as cursor,
+        ):
+            documents = list(cursor)
+        trace_ids = [document["_id"] for document in documents]
+        return self.batch_get_trace_infos(trace_ids, experiment_ids=experiment_ids)
+
+    @staticmethod
+    def _search_value_condition(operator: str, value: Any) -> Any:
+        if operator == "RLIKE":
+            return {"$regex": value}
+        return build_value_condition(operator, value)
+
+    @classmethod
+    def _search_filter_condition(cls, item: TraceSearchFilter) -> dict[str, Any]:
+        if item.field_type == "attribute":
+            if item.key == "end_time_ms":
+                expression = {"$add": ["$request_time", {"$ifNull": ["$execution_duration", 0]}]}
+                return {
+                    "$expr": {
+                        COMPARISON_OPERATORS[item.operator]: [
+                            expression,
+                            {"$literal": item.value},
+                        ]
+                    }
+                }
+            field = cls.SEARCH_ATTRIBUTE_FIELDS[item.key]
+            condition = cls._search_value_condition(item.operator, item.value)
+            if item.operator in ("!=", "NOT IN"):
+                condition["$exists"] = True
+                return {"$and": [{field: condition}, {field: {"$ne": None}}]}
+            return {field: condition}
+
+        if item.field_type == "tag" and item.key == LINKED_PROMPTS_TAG_KEY:
+            name, version = item.value.split("/", 1)
+            return {"linked_prompts": {"$elemMatch": {"name": name, "version": version}}}
+        field = "tags" if item.field_type == "tag" else "trace_metadata"
+        key_match = {"k": item.key}
+        if item.operator == "IS NULL":
+            return {field: {"$not": {"$elemMatch": key_match}}}
+        if item.operator == "IS NOT NULL":
+            return {field: {"$elemMatch": key_match}}
+        if (
+            item.field_type == "request_metadata"
+            and item.key == TraceMetadataKey.SOURCE_RUN
+            and item.operator == "="
+        ):
+            return {
+                "$or": [
+                    {"run_ids": item.value},
+                    {field: {"$elemMatch": {"k": item.key, "v": item.value}}},
+                ]
+            }
+        return {
+            field: {
+                "$elemMatch": {
+                    "k": item.key,
+                    "v": cls._search_value_condition(item.operator, item.value),
+                }
+            }
+        }
+
+    def _search_order_stages(self, order_by: list[TraceSearchOrder]) -> list[dict[str, Any]]:
+        """Build ordering stages with nulls last and deterministic tie breakers."""
+        stages: list[dict[str, Any]] = []
+        sort_fields: dict[str, int] = {}
+        sort_values: dict[str, Any] = {}
+        observed = set()
+        for index, item in enumerate(order_by):
+            observed.add((item.field_type, item.key))
+            if item.field_type == "attribute" and item.key in (
+                "timestamp_ms",
+                "request_id",
+                "experiment_id",
+            ):
+                sort_fields[self.SEARCH_ATTRIBUTE_FIELDS[item.key]] = (
+                    ASCENDING if item.ascending else DESCENDING
+                )
+                continue
+            expression = self._search_order_expression(item)
+            value_field = f"_search_sort_{index}"
+            null_field = f"_search_null_{index}"
+            sort_values[value_field] = expression
+            sort_values[null_field] = {"$cond": [{"$eq": [expression, None]}, 1, 0]}
+            sort_fields[null_field] = ASCENDING
+            sort_fields[value_field] = ASCENDING if item.ascending else DESCENDING
+        if sort_values:
+            stages.append({"$addFields": sort_values})
+        if ("attribute", "timestamp_ms") not in observed:
+            sort_fields["request_time"] = DESCENDING
+        if ("attribute", "request_id") not in observed:
+            sort_fields["_id"] = ASCENDING
+        stages.append({"$sort": sort_fields})
+        return stages
+
+    @classmethod
+    def _search_order_expression(cls, item: TraceSearchOrder) -> Any:
+        if item.field_type == "attribute":
+            if item.key == "end_time_ms":
+                return {"$add": ["$request_time", {"$ifNull": ["$execution_duration", 0]}]}
+            return f"${cls.SEARCH_ATTRIBUTE_FIELDS[item.key]}"
+        field = "$tags" if item.field_type == "tag" else "$trace_metadata"
+        return build_array_value_expression(field, item.key)
 
     def batch_get_traces(
         self, trace_ids: list[str], *, experiment_ids: list[str] | None = None

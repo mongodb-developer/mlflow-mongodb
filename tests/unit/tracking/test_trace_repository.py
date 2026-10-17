@@ -412,6 +412,22 @@ def test_partial_snapshot_failure_closes_cursor_and_preserves_cause(
     assert cursor.__exit__.call_count == 1
 
 
+def test_partial_search_failure_closes_cursor_and_skips_hydration(
+    repository, collections, failing_cursor, monkeypatch
+):
+    cursor, error = failing_cursor
+    collections["traces"].aggregate.return_value = cursor
+    hydrate = Mock()
+    monkeypatch.setattr(repository, "batch_get_trace_infos", hydrate)
+    with pytest.raises(RepositoryPersistenceError) as caught:
+        repository.search_trace_infos(
+            experiment_ids=["42"], filters=[], order_by=[], offset=0, limit=10
+        )
+    assert caught.value.__cause__ is error
+    assert cursor.__exit__.call_count == 1
+    hydrate.assert_not_called()
+
+
 def test_partial_deletion_selection_failure_closes_cursor_before_any_deletes(
     repository, collections, failing_cursor
 ):

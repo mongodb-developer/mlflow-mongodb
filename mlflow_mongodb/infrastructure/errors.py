@@ -84,3 +84,7 @@ class RepositoryTagNotFoundError(Exception):
 
 class RepositoryWriteConflictError(Exception):
     """Raised when a concurrent write invalidates the state required for an update."""
+
+
+class RepositoryInvalidPromptFilterError(Exception):
+    """Raised when a linked-prompt filter is not an exact name/version comparison."""

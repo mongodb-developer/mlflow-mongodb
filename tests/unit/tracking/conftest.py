@@ -223,6 +223,7 @@ def trace_store(store, trace_repository, trace_record_factory, experiment_record
     trace_repository.get_trace_info.return_value = trace_record_factory()
     trace_repository.batch_get_trace_infos.return_value = []
     trace_repository.batch_get_traces.return_value = []
+    trace_repository.search_trace_infos.return_value = []
     trace_repository.get_spans.return_value = []
     return store
 

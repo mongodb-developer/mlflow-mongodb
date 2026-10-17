@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 
 TRACKING_STORE_SPANS_AVAILABLE = hasattr(tracing_constants, "SpansLocation")
+LINKED_PROMPTS_TAG_KEY = getattr(TraceTagKey, "LINKED_PROMPTS", "mlflow.linkedPrompts")
 SPANS_LOCATION_TAG = getattr(TraceTagKey, "SPANS_LOCATION", "mlflow.trace.spansLocation")
 SPANS_LOCATION = "TRACKING_STORE" if TRACKING_STORE_SPANS_AVAILABLE else "ARTIFACT_REPO"
 TRACE_COST_METADATA = getattr(TraceMetadataKey, "COST", "mlflow.trace.cost")
