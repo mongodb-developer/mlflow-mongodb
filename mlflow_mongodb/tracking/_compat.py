@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from importlib.util import find_spec
 from typing import TYPE_CHECKING, Any
 
+from mlflow.store import tracking as tracking_constants
 from mlflow.tracing import constant as tracing_constants
 from mlflow.tracing import utils as tracing_utils
 from mlflow.tracing.constant import SpanAttributeKey, TraceMetadataKey, TraceTagKey
@@ -16,8 +18,12 @@ if TYPE_CHECKING:
     from mlflow_mongodb.tracking.types import SpanSummaryRecord
 
 
+TRACE_METRICS_AVAILABLE = find_spec("mlflow.entities.trace_metrics") is not None
 TRACKING_STORE_SPANS_AVAILABLE = hasattr(tracing_constants, "SpansLocation")
 LINKED_PROMPTS_TAG_KEY = getattr(TraceTagKey, "LINKED_PROMPTS", "mlflow.linkedPrompts")
+MAX_RESULTS_QUERY_TRACE_METRICS = getattr(
+    tracking_constants, "MAX_RESULTS_QUERY_TRACE_METRICS", 1000
+)
 SPANS_LOCATION_TAG = getattr(TraceTagKey, "SPANS_LOCATION", "mlflow.trace.spansLocation")
 SPANS_LOCATION = "TRACKING_STORE" if TRACKING_STORE_SPANS_AVAILABLE else "ARTIFACT_REPO"
 TRACE_COST_METADATA = getattr(TraceMetadataKey, "COST", "mlflow.trace.cost")

@@ -47,7 +47,7 @@ from mlflow.entities.logged_model_tag import LoggedModelTag
 from mlflow.entities.model_registry import PromptVersion
 from mlflow.entities.span import Span
 from mlflow.entities.span_status import SpanStatusCode
-from mlflow.exceptions import MlflowException
+from mlflow.exceptions import MlflowException, MlflowNotImplementedException
 from mlflow.protos.databricks_pb2 import (
     BAD_REQUEST,
     INTERNAL_ERROR,
@@ -134,6 +134,7 @@ from mlflow_mongodb.infrastructure.store_errors import handle_persistence_error
 from mlflow_mongodb.tracking._compat import (
     CONVERSATION_ID_ATTRIBUTE,
     LINKED_PROMPTS_TAG_KEY,
+    MAX_RESULTS_QUERY_TRACE_METRICS,
     SPAN_COST_ATTRIBUTE,
     SPAN_MODEL_ATTRIBUTE,
     SPAN_PROVIDER_ATTRIBUTE,
@@ -143,6 +144,7 @@ from mlflow_mongodb.tracking._compat import (
     SPANS_LOCATION,
     SPANS_LOCATION_TAG,
     TRACE_COST_METADATA,
+    TRACE_METRICS_AVAILABLE,
     aggregate_span_summaries,
     translate_span_when_storing,
     try_json_loads,
@@ -169,6 +171,9 @@ from mlflow_mongodb.tracking.types import (
     SpanSummaryRecord,
     TraceRecord,
 )
+
+if TRACE_METRICS_AVAILABLE:
+    from mlflow.entities.trace_metrics import MetricAggregation, MetricDataPoint, MetricViewType
 
 logger = logging.getLogger(__name__)
 
@@ -1842,6 +1847,59 @@ class MongoDBTrackingStore(AbstractStore):
     def delete_assessment(self, trace_id: str, assessment_id: str) -> None:
         self._get_trace_record(trace_id)
         self._trace_repository.delete_assessment(trace_id=trace_id, assessment_id=assessment_id)
+
+    @handle_persistence_error("Unable to query trace metrics.", logger=logger)
+    def query_trace_metrics(
+        self,
+        experiment_ids: list[str],
+        view_type: MetricViewType,
+        metric_name: str,
+        aggregations: list[MetricAggregation],
+        dimensions: list[str] | None = None,
+        filters: list[str] | None = None,
+        time_interval_seconds: int | None = None,
+        start_time_ms: int | None = None,
+        end_time_ms: int | None = None,
+        max_results: int = MAX_RESULTS_QUERY_TRACE_METRICS,
+        page_token: str | None = None,  # ruff: ignore[unused-method-argument]
+    ) -> PagedList[MetricDataPoint]:
+        if not TRACE_METRICS_AVAILABLE:
+            raise MlflowNotImplementedException("Trace metric queries require MLflow 3.9 or newer.")
+        # Its SQL models import MLflow clients, which are unavailable during discovery.
+        from mlflow.store.tracking.utils.sql_trace_metrics_utils import (  # ruff: ignore[import-outside-top-level]
+            validate_query_trace_metrics_params,
+        )
+
+        validate_query_trace_metrics_params(view_type, metric_name, aggregations, dimensions)
+        if time_interval_seconds and (start_time_ms is None or end_time_ms is None):
+            raise MlflowException.invalid_parameter_value(
+                "start_time_ms and end_time_ms are required if time_interval_seconds is set"
+            )
+
+        try:
+            points = self._trace_repository.query_trace_metrics(
+                experiment_ids=experiment_ids,
+                view_type=view_type,
+                metric_name=metric_name,
+                aggregations=aggregations,
+                dimensions=dimensions,
+                filters=filters,
+                time_interval_seconds=time_interval_seconds,
+                start_time_ms=start_time_ms,
+                end_time_ms=end_time_ms,
+                max_results=max_results,
+            )
+        except RepositoryUnsupportedFieldTypeError as exc:
+            logger.error("Unable to validate trace metric filter: %s", exc)
+            required_view = {
+                "span": MetricViewType.SPANS,
+                "assessment": MetricViewType.ASSESSMENTS,
+            }[exc.field_type]
+            raise MlflowException.invalid_parameter_value(
+                f"Filtering by {exc.field_type} is only supported for {required_view} view "
+                f"type, got {view_type}"
+            ) from None
+        return PagedList(points, None)
 
     # Logged models
 

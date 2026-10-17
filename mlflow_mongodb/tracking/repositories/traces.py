@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from datetime import datetime, timezone
+from types import MappingProxyType
+from typing import Any, ClassVar, Final
 
 from bson.errors import BSONError
 from mlflow.entities.trace_state import TraceState
-from mlflow.tracing.constant import TraceMetadataKey
+from mlflow.tracing.constant import TraceMetadataKey, TraceTagKey
 from pymongo import ASCENDING, DESCENDING, ReplaceOne, ReturnDocument, UpdateOne
 from pymongo.database import Database
 from pymongo.errors import (
@@ -26,6 +29,7 @@ from mlflow_mongodb.infrastructure.errors import (
     RepositoryAlreadyExistsError,
     RepositoryNotFoundError,
     RepositoryPersistenceError,
+    RepositoryUnsupportedFieldTypeError,
     RepositoryWriteConflictError,
 )
 from mlflow_mongodb.infrastructure.repository_operations import repository_operation
@@ -37,12 +41,37 @@ from mlflow_mongodb.tracking._compat import (
     SPANS_LOCATION,
     SPANS_LOCATION_TAG,
     TRACE_COST_METADATA,
+    TRACE_METRICS_AVAILABLE,
 )
 from mlflow_mongodb.tracking.types import (
+    SpanDimensionKey,
     SpanRecord,
     SpanSummaryRecord,
     TraceRecord,
 )
+
+if TRACE_METRICS_AVAILABLE:
+    from mlflow.entities.trace_metrics import (
+        AggregationType,
+        MetricAggregation,
+        MetricDataPoint,
+        MetricViewType,
+    )
+    from mlflow.tracing.constant import (
+        AssessmentMetricDimensionKey,
+        AssessmentMetricKey,
+        AssessmentMetricSearchKey,
+        SpanMetricDimensionKey,
+        SpanMetricKey,
+        SpanMetricSearchKey,
+        TraceMetricDimensionKey,
+        TraceMetricKey,
+        TraceMetricSearchKey,
+    )
+    from mlflow.utils.search_utils import SearchTraceMetricsUtils
+
+    _SPAN_COST_METRIC_KEYS = getattr(SpanMetricKey, "cost_keys", tuple)()
+    _SESSION_COUNT_METRIC = getattr(TraceMetricKey, "SESSION_COUNT", None)
 
 
 @dataclass(frozen=True)
@@ -62,6 +91,15 @@ class TraceSearchOrder:
 
 class TraceRepository:
     """Own trace metadata and the separate span and assessment collections."""
+
+    _TIME_BUCKET_LABEL = "time_bucket"
+    _ASSESSMENT_TYPE_FIELDS: Final = MappingProxyType(
+        {
+            "feedback": "content.feedback",
+            "expectation": "content.expectation",
+            "issue": "content.issue",
+        }
+    )
 
     SEARCH_ATTRIBUTE_FIELDS: ClassVar[dict[str, str]] = {
         "request_id": "_id",
@@ -746,6 +784,53 @@ class TraceRepository:
 
         return records
 
+    def query_trace_metrics(
+        self,
+        *,
+        experiment_ids: list[str],
+        view_type: MetricViewType,
+        metric_name: str,
+        aggregations: list[MetricAggregation],
+        dimensions: list[str] | None,
+        filters: list[str] | None,
+        time_interval_seconds: int | None,
+        start_time_ms: int | None,
+        end_time_ms: int | None,
+        max_results: int,
+    ) -> list[MetricDataPoint]:
+        """Aggregate metrics over trace, span, and assessment documents."""
+        if not TRACE_METRICS_AVAILABLE:
+            raise NotImplementedError("Trace metric queries require MLflow 3.9 or newer.")
+        pipeline = self._build_trace_metrics_pipeline(
+            experiment_ids=experiment_ids,
+            view_type=view_type,
+            metric_name=metric_name,
+            aggregations=aggregations,
+            dimensions=dimensions,
+            filters=filters,
+            time_interval_seconds=time_interval_seconds,
+            start_time_ms=start_time_ms,
+            end_time_ms=end_time_ms,
+            max_results=max_results,
+        )
+        if max_results == 0:
+            return []
+
+        with (
+            repository_operation("Unable to query trace metrics."),
+            self._collection.aggregate(pipeline, allowDiskUse=True) as cursor,
+        ):
+            rows = list(cursor)
+        if (
+            not rows
+            and not dimensions
+            and not time_interval_seconds
+            and aggregations
+            and all(agg.aggregation_type == AggregationType.COUNT for agg in aggregations)
+        ):
+            rows = [{f"agg_{index}": 0 for index in range(len(aggregations))}]
+        return self._to_metric_data_points(rows, metric_name, aggregations)
+
     def set_trace_tag(self, *, trace_id: str, key: str, value: str) -> None:
         tags_update = build_merge_array_expression("$tags", [{"k": key, "v": value}], "k")
         with repository_operation("Unable to set trace tag."):
@@ -864,3 +949,328 @@ class TraceRepository:
                 }
             )
         return result.deleted_count
+
+    @staticmethod
+    def _metric_value(view_type: MetricViewType, metric_name: str) -> Any:
+        if view_type == MetricViewType.TRACES:
+            if metric_name == TraceMetricKey.LATENCY:
+                return "$execution_duration"
+            if metric_name in TraceMetricKey.token_usage_keys():
+                return f"$token_usage.{metric_name}"
+        elif view_type == MetricViewType.SPANS:
+            if metric_name == SpanMetricKey.LATENCY:
+                return {
+                    "$floor": {
+                        "$divide": [
+                            {
+                                "$subtract": [
+                                    "$_metric_row.end_time_ns",
+                                    "$_metric_row.start_time_ns",
+                                ]
+                            },
+                            1_000_000,
+                        ]
+                    }
+                }
+            if metric_name in _SPAN_COST_METRIC_KEYS:
+                return f"$_metric_row.cost.{metric_name}"
+        elif view_type == MetricViewType.ASSESSMENTS:
+            if metric_name == AssessmentMetricKey.ASSESSMENT_VALUE:
+                value = "$_assessment_value"
+                return {
+                    "$switch": {
+                        "branches": [
+                            {"case": {"$in": [value, [True, "yes"]]}, "then": 1.0},
+                            {"case": {"$in": [value, [False, "no"]]}, "then": 0.0},
+                            {"case": {"$isNumber": value}, "then": value},
+                        ],
+                        "default": None,
+                    }
+                }
+        return None
+
+    @staticmethod
+    def _dimension_value(view_type: MetricViewType, dimension: str) -> Any:
+        expressions = {
+            MetricViewType.TRACES: {
+                TraceMetricDimensionKey.TRACE_NAME: build_array_value_expression(
+                    "$tags", TraceTagKey.TRACE_NAME
+                ),
+                TraceMetricDimensionKey.TRACE_STATUS: "$state",
+            },
+            MetricViewType.SPANS: {
+                SpanMetricDimensionKey.SPAN_NAME: "$_metric_row.name",
+                SpanMetricDimensionKey.SPAN_TYPE: "$_metric_row.type",
+                SpanMetricDimensionKey.SPAN_STATUS: "$_metric_row.status",
+            },
+            MetricViewType.ASSESSMENTS: {
+                AssessmentMetricDimensionKey.ASSESSMENT_NAME: (
+                    "$_metric_row.content.assessment_name"
+                ),
+                AssessmentMetricDimensionKey.ASSESSMENT_VALUE: "$_assessment_value",
+            },
+        }
+        for name, field in (
+            ("SPAN_MODEL_NAME", SpanDimensionKey.MODEL),
+            ("SPAN_MODEL_PROVIDER", SpanDimensionKey.MODEL_PROVIDER),
+        ):
+            if key := getattr(SpanMetricDimensionKey, name, None):
+                expressions[MetricViewType.SPANS][key] = (
+                    f"$_metric_row.dimension_attributes.{field}"
+                )
+        return expressions[view_type][dimension]
+
+    @classmethod
+    def _filter_stages(
+        cls, filters: list[str] | None, view_type: MetricViewType
+    ) -> tuple[list, list]:
+        trace_clauses = []
+        row_clauses = []
+        if view_type == MetricViewType.ASSESSMENTS:
+            row_clauses.append({"content.valid": {"$ne": False}})
+        for filter_string in filters or []:
+            parsed = SearchTraceMetricsUtils.parse_search_filter(filter_string)
+            value = parsed.value
+            if parsed.view_type == TraceMetricSearchKey.VIEW_TYPE:
+                if parsed.entity == TraceMetricSearchKey.STATUS:
+                    trace_clauses.append({"state": value})
+                elif parsed.entity == TraceMetricSearchKey.TAG:
+                    trace_clauses.append({"tags": {"$elemMatch": {"k": parsed.key, "v": value}}})
+                elif parsed.entity == TraceMetricSearchKey.METADATA:
+                    clause: dict[str, Any] = {
+                        "trace_metadata": {"$elemMatch": {"k": parsed.key, "v": value}}
+                    }
+                    if parsed.key == TraceMetadataKey.SOURCE_RUN:
+                        clause = {"$or": [clause, {"run_ids": value}]}
+                    trace_clauses.append(clause)
+            elif parsed.view_type == SpanMetricSearchKey.VIEW_TYPE:
+                if view_type != MetricViewType.SPANS:
+                    raise RepositoryUnsupportedFieldTypeError(parsed.view_type)
+                row_clauses.append({parsed.entity: value})
+            elif parsed.view_type == AssessmentMetricSearchKey.VIEW_TYPE:
+                if view_type != MetricViewType.ASSESSMENTS:
+                    raise RepositoryUnsupportedFieldTypeError(parsed.view_type)
+                field = (
+                    "assessment_name" if parsed.entity == AssessmentMetricSearchKey.NAME else None
+                )
+                if field:
+                    row_clauses.append({f"content.{field}": value})
+                else:
+                    assessment_field = cls._ASSESSMENT_TYPE_FIELDS.get(value)
+                    row_clauses.append(
+                        {assessment_field: {"$exists": True}}
+                        if assessment_field
+                        else {"$expr": False}
+                    )
+        return trace_clauses, row_clauses
+
+    def _build_trace_metrics_pipeline(
+        self,
+        *,
+        experiment_ids: list[str],
+        view_type: MetricViewType,
+        metric_name: str,
+        aggregations: list[MetricAggregation],
+        dimensions: list[str] | None,
+        filters: list[str] | None,
+        time_interval_seconds: int | None,
+        start_time_ms: int | None,
+        end_time_ms: int | None,
+        max_results: int,
+    ) -> list[dict[str, Any]]:
+        """Build a trace-scoped pipeline with row-level filters for each view."""
+        trace_clauses, row_clauses = self._filter_stages(filters, view_type)
+        if experiment_ids:
+            trace_clauses.insert(0, {"experiment_id": {"$in": list(map(str, experiment_ids))}})
+        if start_time_ms is not None or end_time_ms is not None:
+            bounds = {}
+            if start_time_ms is not None:
+                bounds["$gte"] = start_time_ms
+            if end_time_ms is not None:
+                bounds["$lte"] = end_time_ms
+            trace_clauses.insert(0, {"request_time": bounds})
+
+        pipeline = []
+        if trace_clauses:
+            pipeline.append({"$match": {"$and": trace_clauses}})
+
+        if view_type in (MetricViewType.SPANS, MetricViewType.ASSESSMENTS):
+            collection = (
+                self._settings.spans_collection_name
+                if view_type == MetricViewType.SPANS
+                else self._settings.assessments_collection_name
+            )
+
+            lookup: dict[str, Any] = {
+                "from": collection,
+                "localField": "_id",
+                "foreignField": "trace_id",
+                "as": "_metric_row",
+            }
+            if row_clauses:
+                match = row_clauses[0] if len(row_clauses) == 1 else {"$and": row_clauses}
+                lookup["pipeline"] = [{"$match": match}]
+            pipeline.extend(
+                [
+                    {"$lookup": lookup},
+                    {"$unwind": "$_metric_row"},
+                ]
+            )
+
+        metric_match = {}
+        if view_type == MetricViewType.TRACES:
+            if TraceMetricDimensionKey.TRACE_NAME in (dimensions or []):
+                metric_match["tags"] = {"$elemMatch": {"k": TraceTagKey.TRACE_NAME}}
+            if metric_name == _SESSION_COUNT_METRIC:
+                metric_match["trace_metadata"] = {
+                    "$elemMatch": {"k": TraceMetadataKey.TRACE_SESSION}
+                }
+            elif metric_name in TraceMetricKey.token_usage_keys():
+                metric_match[f"token_usage.{metric_name}"] = {"$exists": True}
+        elif view_type == MetricViewType.SPANS:
+            if metric_name in _SPAN_COST_METRIC_KEYS:
+                metric_match[f"_metric_row.cost.{metric_name}"] = {"$exists": True}
+        if metric_match:
+            pipeline.append({"$match": metric_match})
+
+        pipeline.extend(self._metric_preparation_stages(view_type, metric_name))
+
+        group_keys = {}
+        if time_interval_seconds:
+            if view_type == MetricViewType.SPANS:
+                timestamp = {"$divide": ["$_metric_row.start_time_ns", 1_000_000]}
+            elif view_type == MetricViewType.ASSESSMENTS:
+                timestamp = {
+                    "$toLong": {
+                        "$dateFromString": {"dateString": "$_metric_row.content.create_time"}
+                    }
+                }
+            else:
+                timestamp = "$request_time"
+            size_ms = time_interval_seconds * 1000
+            group_keys[self._TIME_BUCKET_LABEL] = {
+                "$multiply": [{"$floor": {"$divide": [timestamp, size_ms]}}, size_ms]
+            }
+        for dimension in dimensions or []:
+            group_keys[dimension] = {"$ifNull": [self._dimension_value(view_type, dimension), None]}
+
+        group = {"_id": group_keys or None}
+        for index, aggregation in enumerate(aggregations):
+            if aggregation.aggregation_type == AggregationType.COUNT:
+                if metric_name == _SESSION_COUNT_METRIC:
+                    group["_sessions"] = {"$addToSet": {"$ifNull": ["$_session", "$$REMOVE"]}}
+                else:
+                    group[f"agg_{index}"] = {"$sum": 1}
+            elif aggregation.aggregation_type == AggregationType.SUM:
+                group[f"agg_{index}"] = {"$sum": "$_metric_value"}
+                group["_has_numeric_value"] = {"$max": {"$isNumber": "$_metric_value"}}
+            elif aggregation.aggregation_type == AggregationType.AVG:
+                group[f"agg_{index}"] = {"$avg": "$_metric_value"}
+            elif aggregation.aggregation_type == AggregationType.PERCENTILE:
+                group[f"agg_{index}"] = {
+                    "$percentile": {
+                        "input": "$_metric_value",
+                        "p": [aggregation.percentile_value / 100.0],
+                        "method": "approximate",
+                    }
+                }
+        pipeline.append({"$group": group})
+
+        calculated = {}
+        if metric_name == _SESSION_COUNT_METRIC and view_type == MetricViewType.TRACES:
+            for index in range(len(aggregations)):
+                calculated[f"agg_{index}"] = {"$size": "$_sessions"}
+        for index, aggregation in enumerate(aggregations):
+            if aggregation.aggregation_type == AggregationType.SUM:
+                calculated[f"agg_{index}"] = {
+                    "$cond": ["$_has_numeric_value", f"$agg_{index}", None]
+                }
+            elif aggregation.aggregation_type == AggregationType.PERCENTILE:
+                calculated[f"agg_{index}"] = {"$arrayElemAt": [f"$agg_{index}", 0]}
+        if calculated:
+            pipeline.append({"$set": calculated})
+
+        if group_keys:
+            pipeline.append({"$sort": {f"_id.{key}": 1 for key in group_keys}})
+        if max_results is not None:
+            pipeline.append({"$limit": max_results})
+        return pipeline
+
+    @classmethod
+    def _metric_preparation_stages(
+        cls, view_type: MetricViewType, metric_name: str
+    ) -> list[dict[str, Any]]:
+        """Build the temporary metric fields needed by each view before grouping."""
+        if view_type == MetricViewType.TRACES:
+            if metric_name == _SESSION_COUNT_METRIC:
+                return [
+                    {
+                        "$set": {
+                            "_session": build_array_value_expression(
+                                "$trace_metadata", TraceMetadataKey.TRACE_SESSION
+                            )
+                        }
+                    }
+                ]
+            value = cls._metric_value(view_type, metric_name)
+            if value is not None:
+                return [{"$set": {"_metric_value": value}}]
+        elif view_type == MetricViewType.SPANS:
+            value = cls._metric_value(view_type, metric_name)
+            if value is not None:
+                return [{"$set": {"_metric_value": value}}]
+        elif view_type == MetricViewType.ASSESSMENTS:
+            stages = [
+                {
+                    "$set": {
+                        "_assessment_value": {
+                            "$ifNull": [
+                                "$_metric_row.content.feedback.value",
+                                {
+                                    "$ifNull": [
+                                        "$_metric_row.content.expectation.value",
+                                        "$_metric_row.content.issue",
+                                    ]
+                                },
+                            ]
+                        }
+                    }
+                }
+            ]
+            if metric_name == AssessmentMetricKey.ASSESSMENT_VALUE:
+                stages.append(
+                    {"$set": {"_metric_value": cls._metric_value(view_type, metric_name)}}
+                )
+            return stages
+        return []
+
+    @classmethod
+    def _to_metric_data_points(
+        cls,
+        rows: list[dict[str, Any]],
+        metric_name: str,
+        aggregations: list[MetricAggregation],
+    ) -> list[MetricDataPoint]:
+        """Apply MLflow's result conversion, including null groups and UTC buckets."""
+        points = []
+        for row in rows:
+            dimensions = dict(row.get("_id") or {})
+            assessment_value = AssessmentMetricDimensionKey.ASSESSMENT_VALUE
+            if assessment_value in dimensions:
+                dimensions[assessment_value] = json.dumps(dimensions[assessment_value])
+            if any(value is None for value in dimensions.values()):
+                continue
+            if cls._TIME_BUCKET_LABEL in dimensions:
+                dimensions[cls._TIME_BUCKET_LABEL] = datetime.fromtimestamp(
+                    float(dimensions[cls._TIME_BUCKET_LABEL]) / 1000, tz=timezone.utc
+                ).isoformat()
+            values = {
+                str(aggregation): row[f"agg_{index}"]
+                for index, aggregation in enumerate(aggregations)
+                if row.get(f"agg_{index}") is not None
+            }
+            if values:
+                points.append(
+                    MetricDataPoint(metric_name=metric_name, dimensions=dimensions, values=values)
+                )
+        return points
