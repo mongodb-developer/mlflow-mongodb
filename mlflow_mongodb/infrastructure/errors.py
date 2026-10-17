@@ -14,6 +14,10 @@ class RepositoryNotFoundError(Exception):
 class RepositoryNotActiveError(Exception):
     """Raised when an operation requires an active resource."""
 
+    def __init__(self, resource_id: str | None, lifecycle_stage: str | None = None):
+        super().__init__(resource_id, lifecycle_stage)
+        self.lifecycle_stage = lifecycle_stage
+
 
 class RepositoryPersistenceError(Exception):
     """Raised when a database operation cannot be completed."""

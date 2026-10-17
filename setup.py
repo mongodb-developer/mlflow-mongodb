@@ -31,6 +31,10 @@ setup(
         ],
     },
     entry_points={
+        "mlflow.tracking_store": [
+            "mongodb=mlflow_mongodb.tracking.store:MongoDBTrackingStore",
+            "mongodb+srv=mlflow_mongodb.tracking.store:MongoDBTrackingStore",
+        ],
         "mlflow.model_registry_store": [
             "mongodb=mlflow_mongodb.model_registry.store:MongoDBModelRegistryStore",
             "mongodb+srv=mlflow_mongodb.model_registry.store:MongoDBModelRegistryStore",

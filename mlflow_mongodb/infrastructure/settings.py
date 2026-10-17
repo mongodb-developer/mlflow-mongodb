@@ -11,9 +11,13 @@ class MongoDBSettings:
 
     registered_models_collection_name: str = "registered_models"
     model_versions_collection_name: str = "model_versions"
+    experiments_collection_name: str = "experiments"
+    experiment_id_counters_collection_name: str = "experiment_id_counters"
 
     def __post_init__(self) -> None:
         for field_name in (
+            "experiments_collection_name",
+            "experiment_id_counters_collection_name",
             "registered_models_collection_name",
             "model_versions_collection_name",
         ):
@@ -31,6 +35,14 @@ class MongoDBSettings:
         """Load collection-name overrides from environment variables."""
         environment = os.environ if environ is None else environ
         return cls(
+            experiments_collection_name=environment.get(
+                "MLFLOW_MONGODB_EXPERIMENTS_COLLECTION",
+                cls.experiments_collection_name,
+            ),
+            experiment_id_counters_collection_name=environment.get(
+                "MLFLOW_MONGODB_EXPERIMENT_ID_COUNTERS_COLLECTION",
+                cls.experiment_id_counters_collection_name,
+            ),
             registered_models_collection_name=environment.get(
                 "MLFLOW_MONGODB_REGISTERED_MODELS_COLLECTION",
                 cls.registered_models_collection_name,
