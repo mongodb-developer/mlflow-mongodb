@@ -10,7 +10,7 @@ from mlflow.protos.databricks_pb2 import (
     ErrorCode,
 )
 
-from mlflow_mongodb import MongoDBModelRegistryStore
+from mlflow_mongodb.model_registry.store import MongoDBModelRegistryStore
 
 
 def test_model_version_create_update_and_stage_validation_contract(

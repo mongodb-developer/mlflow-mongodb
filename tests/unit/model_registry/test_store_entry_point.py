@@ -3,7 +3,7 @@
 import pytest
 from mlflow.tracking._model_registry.utils import _get_store  # ruff: ignore[import-private-name]
 
-from mlflow_mongodb import MongoDBModelRegistryStore
+from mlflow_mongodb.model_registry.store import MongoDBModelRegistryStore
 
 
 @pytest.mark.parametrize("scheme", ["mongodb", "mongodb+srv"])

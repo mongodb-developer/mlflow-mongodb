@@ -3,7 +3,7 @@
 from mlflow.entities.model_registry import ModelVersionTag, RegisteredModelTag
 from mlflow.prompt.constants import IS_PROMPT_TAG_KEY, PROMPT_TEXT_TAG_KEY
 
-from mlflow_mongodb import MongoDBModelRegistryStore
+from mlflow_mongodb.model_registry.store import MongoDBModelRegistryStore
 
 
 def _create_search_data(store: MongoDBModelRegistryStore):
