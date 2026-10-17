@@ -175,6 +175,12 @@ from mlflow_mongodb.tracking.types import (
 if TRACE_METRICS_AVAILABLE:
     from mlflow.entities.trace_metrics import MetricAggregation, MetricDataPoint, MetricViewType
 
+try:
+    from mlflow.utils.search_utils import SearchEvaluationDatasetsUtils
+except ImportError:
+    # MLflow 3.1 has no evaluation-dataset search API or parser.
+    SearchEvaluationDatasetsUtils = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -2300,6 +2306,83 @@ class MongoDBTrackingStore(AbstractStore):
             [self._to_logged_model(result.model, result.metrics) for result in page.records],
             next_token,
         )
+
+    @cached_property
+    def _dataset_filter_validator(self) -> SearchFilterValidator:
+        return ConfiguredSearchFilterValidator(
+            field_types=("attribute", "tag"),
+            attribute_keys=SearchEvaluationDatasetsUtils.VALID_SEARCH_ATTRIBUTE_KEYS,
+            comparators={
+                "attribute": SearchEvaluationDatasetsUtils.VALID_TAG_COMPARATORS,
+                "tag": SearchEvaluationDatasetsUtils.VALID_TAG_COMPARATORS,
+            },
+            field_comparators={
+                (
+                    "attribute",
+                    key,
+                ): SearchEvaluationDatasetsUtils.VALID_NUMERIC_ATTRIBUTE_COMPARATORS
+                for key in SearchEvaluationDatasetsUtils.NUMERIC_ATTRIBUTES
+            },
+            uppercase_comparators=False,
+        )
+
+    def search_datasets(
+        self,
+        experiment_ids: list[str] | None = None,  # ruff: ignore[unused-method-argument]
+        filter_string: str | None = None,
+        max_results: int = 1000,
+        order_by: list[str] | None = None,
+        page_token: str | None = None,
+    ) -> PagedList:
+        """Return an empty evaluation-dataset page until dataset storage is implemented."""
+        if SearchEvaluationDatasetsUtils is None:
+            raise MlflowException.invalid_parameter_value(
+                "Evaluation dataset search is unavailable in this MLflow version."
+            )
+
+        if (
+            isinstance(max_results, bool)
+            or not isinstance(max_results, int)
+            or max_results < 1
+            or max_results > SEARCH_MAX_RESULTS_THRESHOLD
+        ):
+            raise MlflowException.invalid_parameter_value(
+                f"`max_results` must be a positive integer at most {SEARCH_MAX_RESULTS_THRESHOLD}."
+            )
+
+        for parsed in SearchEvaluationDatasetsUtils.parse_search_filter(filter_string):
+            try:
+                self._dataset_filter_validator.validate(parsed)
+            except RepositoryUnsupportedFieldTypeError as exc:
+                logger.error("Unable to validate evaluation dataset filter: %s", exc)
+                raise MlflowException.invalid_parameter_value(
+                    f"Invalid evaluation dataset search field type: {exc.field_type}"
+                ) from None
+            except RepositoryInvalidAttributeError as exc:
+                logger.error("Unable to validate evaluation dataset filter: %s", exc)
+                raise MlflowException.invalid_parameter_value(
+                    f"Invalid evaluation dataset attribute: {exc.key}"
+                ) from None
+            except RepositoryUnsupportedComparatorError as exc:
+                logger.error("Unable to validate evaluation dataset filter: %s", exc)
+                raise MlflowException.invalid_parameter_value(
+                    f"Invalid comparator for evaluation dataset {exc.field_type}: {exc.comparator}"
+                ) from None
+
+        for clause in order_by or []:
+            key_type, _, _ = (
+                SearchEvaluationDatasetsUtils.parse_order_by_for_search_evaluation_datasets(clause)
+            )
+            if key_type != "attribute":
+                raise MlflowException.invalid_parameter_value(
+                    f"Invalid order_by entity: {key_type}"
+                )
+        offset = SearchUtils.parse_start_offset_from_page_token(page_token)
+        if offset < 0:
+            raise MlflowException.invalid_parameter_value("Page offset must not be negative.")
+
+        # No evaluation-dataset records can be created by this store yet.
+        return PagedList([], None)
 
     @handle_persistence_error("Unable to get logged model.", logger=logger)
     def get_logged_model(self, model_id: str, allow_deleted: bool = False) -> LoggedModel:
