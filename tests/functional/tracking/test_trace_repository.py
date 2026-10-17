@@ -3,6 +3,14 @@
 from copy import deepcopy
 
 import pytest
+from mlflow.tracing.constant import TraceMetadataKey
+from pymongo.errors import BulkWriteError
+
+from mlflow_mongodb.infrastructure.errors import (
+    RepositoryPersistenceError,
+    RepositoryWriteConflictError,
+)
+from mlflow_mongodb.tracking.types import SpanSummaryRecord
 
 
 @pytest.fixture
@@ -153,6 +161,45 @@ def test_start_trace_preview_update_preserves_or_replaces_stored_value(
     assert getattr(record, field) == expected
 
 
+def test_ensure_traces_creates_placeholders_without_overwriting_existing_metadata(
+    repository, start_trace_arguments
+):
+    record = repository.start_trace(**start_trace_arguments)
+    before = repository._collection.find_one({"_id": record.trace_id})
+
+    repository.ensure_traces(
+        experiment_id=record.experiment_id, request_times={record.trace_id: 1, "tr-placeholder": 2}
+    )
+
+    assert repository._collection.find_one({"_id": record.trace_id}) == before
+    placeholder = repository.get_trace_info("tr-placeholder")
+    assert placeholder.experiment_id == record.experiment_id
+    assert placeholder.request_time == 2
+    assert placeholder.state == "IN_PROGRESS"
+    assert placeholder.execution_duration is None
+    assert placeholder.trace_metadata == ()
+    document = repository._collection.find_one({"_id": placeholder.trace_id})
+    assert document["trace_info_finalized"] is False
+    assert all(set(tag) == {"k", "v"} for tag in document["tags"])
+
+
+def test_ensure_traces_rejects_an_existing_trace_owned_by_another_experiment(
+    repository, start_trace_arguments
+):
+    record = repository.start_trace(**start_trace_arguments)
+    before = repository._collection.find_one({"_id": record.trace_id})
+
+    with pytest.raises(RepositoryPersistenceError) as caught:
+        repository.ensure_traces(
+            experiment_id="other-experiment", request_times={record.trace_id: 1}
+        )
+
+    assert isinstance(caught.value.__cause__, BulkWriteError)
+    assert caught.value.__cause__.details["writeErrors"][0]["code"] == 11000
+    assert repository._collection.find_one({"_id": record.trace_id}) == before
+    assert repository._collection.count_documents({}) == 1
+
+
 def test_exported_assessments_replace_by_id_preserve_others_and_keep_native_values(
     repository, start_trace_arguments
 ):
@@ -173,3 +220,122 @@ def test_exported_assessments_replace_by_id_preserve_others_and_keep_native_valu
     assert repository._assessments_collection.count_documents({"trace_id": record.trace_id}) == 2
     assert replacement == before
     assert original["trace_id"] == "wrong"
+
+
+def test_span_snapshot_returns_revision_and_sorted_projected_records(
+    repository, trace, store, span_factory
+):
+    later = store._span_to_document(span_factory(trace_id=trace.trace_id, span_id=3))
+    earlier = store._span_to_document(
+        span_factory(
+            trace_id=trace.trace_id,
+            span_id=2,
+            start_time=trace.request_time * 1_000_000 - 1_000_000,
+        )
+    )
+    tied = store._span_to_document(span_factory(trace_id=trace.trace_id, span_id=1))
+    unrelated = store._span_to_document(span_factory(trace_id="tr-unrelated", span_id=4))
+    repository.log_spans([later, earlier, tied, unrelated])
+
+    revision, records = repository.span_summary_snapshot(
+        trace_id=trace.trace_id, experiment_id=trace.experiment_id
+    )
+
+    assert revision == 1
+    assert records == [
+        SpanSummaryRecord.from_document(document) for document in (earlier, tied, later)
+    ]
+    next_revision, repeated = repository.span_summary_snapshot(
+        trace_id=trace.trace_id, experiment_id=trace.experiment_id
+    )
+    assert next_revision == revision + 1
+    assert repeated == records
+
+
+def test_span_redelivery_does_not_replace_first_stored_payload(
+    repository, trace, store, span_factory
+):
+    first = store._span_to_document(span_factory(trace_id=trace.trace_id))
+    changed = store._span_to_document(
+        span_factory(trace_id=trace.trace_id, end_time=first["end_time_ns"] + 1_000_000)
+    )
+    repository.log_spans([first])
+
+    repository.log_spans([changed])
+
+    records = repository.get_spans(trace.trace_id)
+    assert len(records) == 1
+    assert records[0].content == first["content"]
+    assert records[0].end_time_ns == first["end_time_ns"]
+
+
+def test_summary_update_merges_missing_keys_and_respects_authoritative_metadata(
+    repository, start_trace_arguments
+):
+    record = repository.start_trace(
+        **{**start_trace_arguments, "request_preview": "explicit"},
+        metrics={"token_usage": {"input_tokens": 10}},
+    )
+    revision, _ = repository.span_summary_snapshot(
+        trace_id=record.trace_id, experiment_id=record.experiment_id
+    )
+    summary = {
+        "state": "ERROR",
+        "request_time": 1,
+        "execution_duration": 99,
+        "request_preview": "derived",
+        "response_preview": "$response",
+        "tags": {"team.name": "derived", "new": "$tag"},
+        "metadata": {"source": "derived", "session": "$session"},
+        "token_usage": {"input_tokens": 4},
+        "cost": None,
+        "aggregate_metadata": {TraceMetadataKey.TOKEN_USAGE: '{"input_tokens": 4}'},
+    }
+
+    repository.update_span_summary(
+        trace_id=record.trace_id,
+        experiment_id=record.experiment_id,
+        revision=revision,
+        summary=summary,
+    )
+
+    updated = repository.get_trace_info(record.trace_id)
+    assert updated.state == "OK"
+    assert updated.request_time == record.request_time
+    assert updated.execution_duration == 10
+    assert updated.request_preview == "explicit"
+    assert updated.response_preview == "$response"
+    assert {item.key: item.value for item in updated.tags} == {"team.name": "$risk", "new": "$tag"}
+    assert {item.key: item.value for item in updated.trace_metadata} == {
+        "source": "$run",
+        "session": "$session",
+        TraceMetadataKey.TOKEN_USAGE: '{"input_tokens": 4}',
+    }
+
+
+def test_stale_summary_revision_cannot_overwrite_newer_snapshot(repository, trace):
+    revision, _ = repository.span_summary_snapshot(
+        trace_id=trace.trace_id, experiment_id=trace.experiment_id
+    )
+    repository.span_summary_snapshot(trace_id=trace.trace_id, experiment_id=trace.experiment_id)
+    summary = {
+        "state": "ERROR",
+        "tags": {},
+        "metadata": {},
+        "request_time": 1,
+        "execution_duration": 2,
+        "request_preview": None,
+        "response_preview": None,
+        "token_usage": None,
+        "cost": None,
+    }
+
+    with pytest.raises(RepositoryWriteConflictError):
+        repository.update_span_summary(
+            trace_id=trace.trace_id,
+            experiment_id=trace.experiment_id,
+            revision=revision,
+            summary=summary,
+        )
+
+    assert repository.get_trace_info(trace.trace_id).state == "OK"

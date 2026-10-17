@@ -1,3 +1,4 @@
+import json
 from collections.abc import Mapping
 from unittest.mock import create_autospec
 from uuid import UUID
@@ -5,6 +6,11 @@ from uuid import UUID
 import pytest
 from mlflow.entities import LifecycleStage
 from mlflow.entities.assessment import Feedback
+from mlflow.entities.span import Span
+from mlflow.tracing.constant import SpanAttributeKey
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import ReadableSpan
+from opentelemetry.trace import SpanContext, Status, StatusCode
 
 from mlflow_mongodb.tracking.repositories import (
     ExperimentRepository,
@@ -19,6 +25,7 @@ from mlflow_mongodb.tracking.types import (
     ExperimentTagRecord,
     LoggedModelRecord,
     RunRecord,
+    SpanRecord,
     TraceRecord,
 )
 
@@ -237,5 +244,51 @@ def feedback_factory(trace_record_factory):
         assessment = Feedback(**arguments)
         assessment.assessment_id = assessment_id
         return assessment
+
+    return factory
+
+
+@pytest.fixture
+def span_factory(trace_record_factory):
+    def factory(
+        *,
+        span_id=1,
+        parent_id=None,
+        trace_id=None,
+        start_time=1_000_000,
+        end_time=11_000_000,
+        status=StatusCode.OK,
+        attributes=None,
+        resource_attributes=None,
+    ):
+        trace_id = trace_id or trace_record_factory().trace_id
+        values = {SpanAttributeKey.REQUEST_ID: trace_id, SpanAttributeKey.SPAN_TYPE: "CHAIN"}
+        values.update(attributes or {})
+        return Span(
+            ReadableSpan(
+                name=f"span-{span_id}",
+                context=SpanContext(trace_id=42, span_id=span_id, is_remote=False),
+                parent=(
+                    SpanContext(trace_id=42, span_id=parent_id, is_remote=False)
+                    if parent_id is not None
+                    else None
+                ),
+                start_time=start_time,
+                end_time=end_time,
+                status=Status(status),
+                attributes={key: json.dumps(value) for key, value in values.items()},
+                resource=Resource(resource_attributes or {}),
+            )
+        )
+
+    return factory
+
+
+@pytest.fixture
+def span_record_factory(span_factory):
+    def factory(**kwargs):
+        return SpanRecord.from_document(
+            MongoDBTrackingStore._span_to_document(span_factory(**kwargs))
+        )
 
     return factory

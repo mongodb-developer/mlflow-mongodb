@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import binascii
 import json
 import logging
 import math
+from collections import defaultdict
 from copy import deepcopy
 from functools import cached_property
 from typing import Any
@@ -43,6 +45,7 @@ from mlflow.entities.logged_model_status import LoggedModelStatus
 from mlflow.entities.logged_model_tag import LoggedModelTag
 from mlflow.entities.model_registry import PromptVersion
 from mlflow.entities.span import Span
+from mlflow.entities.span_status import SpanStatusCode
 from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import (
     BAD_REQUEST,
@@ -50,6 +53,7 @@ from mlflow.protos.databricks_pb2 import (
     INVALID_STATE,
     RESOURCE_ALREADY_EXISTS,
     RESOURCE_DOES_NOT_EXIST,
+    TEMPORARILY_UNAVAILABLE,
 )
 from mlflow.store.entities.paged_list import PagedList
 from mlflow.store.tracking import (
@@ -59,9 +63,12 @@ from mlflow.store.tracking import (
 )
 from mlflow.store.tracking.abstract_store import AbstractStore
 from mlflow.tracing.constant import (
+    TRACE_REQUEST_RESPONSE_PREVIEW_MAX_LENGTH_OSS,
+    SpanAttributeKey,
     TraceMetadataKey,
     TraceSizeStatsKey,
 )
+from mlflow.tracing.utils.truncation import _get_truncated_preview
 from mlflow.tracking.default_experiment import DEFAULT_EXPERIMENT_ID
 from mlflow.utils.mlflow_tags import (
     MLFLOW_ARTIFACT_LOCATION,
@@ -106,6 +113,7 @@ from mlflow_mongodb.infrastructure.errors import (
     RepositoryTagNotFoundError,
     RepositoryUnsupportedComparatorError,
     RepositoryUnsupportedFieldTypeError,
+    RepositoryWriteConflictError,
 )
 from mlflow_mongodb.infrastructure.retry import retry_on_exception
 from mlflow_mongodb.infrastructure.search_filters import (
@@ -116,9 +124,18 @@ from mlflow_mongodb.infrastructure.search_filters import (
 from mlflow_mongodb.infrastructure.settings import MongoDBSettings
 from mlflow_mongodb.infrastructure.store_errors import handle_persistence_error
 from mlflow_mongodb.tracking._compat import (
+    CONVERSATION_ID_ATTRIBUTE,
+    SPAN_COST_ATTRIBUTE,
+    SPAN_MODEL_ATTRIBUTE,
+    SPAN_PROVIDER_ATTRIBUTE,
+    SPAN_SESSION_ATTRIBUTE,
+    SPAN_TRACE_TAG_PREFIX,
+    SPAN_USER_ATTRIBUTE,
     SPANS_LOCATION,
     SPANS_LOCATION_TAG,
     TRACE_COST_METADATA,
+    aggregate_span_summaries,
+    translate_span_when_storing,
     try_json_loads,
 )
 from mlflow_mongodb.tracking.repositories import (
@@ -136,7 +153,9 @@ from mlflow_mongodb.tracking.types import (
     LoggedModelRecord,
     RunMetricRecord,
     RunRecord,
+    SpanDimensionKey,
     SpanRecord,
+    SpanSummaryRecord,
     TraceRecord,
 )
 
@@ -1218,6 +1237,77 @@ class MongoDBTrackingStore(AbstractStore):
         spans.sort(key=lambda span: (span.parent_id is not None, span.start_time_ns, span.span_id))
         return Trace(info=trace_info, data=TraceData(spans=spans))
 
+    @handle_persistence_error("Unable to log spans.", logger=logger)
+    def log_spans(
+        self,
+        location: str,
+        spans: list[Span],
+        tracking_uri: str | None = None,  # ruff: ignore[unused-method-argument]
+    ) -> list[Span]:
+        """Persist spans and refresh their traces, allowing repeated and late delivery.
+
+        The store's connection selects MongoDB; tracking_uri is unused by this backend.
+        Writes across collections are separate and may partially succeed on failure.
+        """
+        if not spans:
+            return []
+        if not isinstance(location, str) or not location:
+            raise MlflowException.invalid_parameter_value("location must be an experiment ID.")
+
+        self._validate_span_ingestion_experiment(location)
+        documents, documents_by_trace = self._prepare_span_documents(spans)
+        self._ensure_span_traces(location, documents_by_trace)
+        self._persist_span_documents(documents)
+        self._refresh_span_summaries(location, documents_by_trace)
+        return spans
+
+    def _validate_span_ingestion_experiment(self, experiment_id: str) -> None:
+        experiment = self.get_experiment(experiment_id)
+
+        if experiment.lifecycle_stage != LifecycleStage.ACTIVE:
+            raise MlflowException.invalid_parameter_value(
+                f"The experiment {experiment_id} must be in the 'active' state. "
+                f"Current state is {experiment.lifecycle_stage}."
+            )
+
+    def _ensure_span_traces(
+        self,
+        experiment_id: str,
+        documents_by_trace: defaultdict[str, list[dict[str, Any]]],
+    ) -> None:
+        request_times = {
+            trace_id: min(document["start_time_ns"] for document in trace_documents) // 1_000_000
+            for trace_id, trace_documents in documents_by_trace.items()
+        }
+        self._trace_repository.ensure_traces(
+            experiment_id=experiment_id, request_times=request_times
+        )
+
+    def _persist_span_documents(self, documents: list[dict[str, Any]]) -> None:
+        self._trace_repository.log_spans(documents)
+
+    def _refresh_span_summaries(
+        self,
+        experiment_id: str,
+        documents_by_trace: defaultdict[str, list[dict[str, Any]]],
+    ) -> None:
+        try:
+            for trace_id in documents_by_trace:
+                self._refresh_trace_span_summary(trace_id, experiment_id)
+        except RepositoryNotFoundError as exc:
+            logger.error("Unable to refresh trace span summaries: %s", exc)
+            raise MlflowException(
+                f"Trace '{exc.args[0]}' was deleted during span ingestion.",
+                RESOURCE_DOES_NOT_EXIST,
+            ) from None
+        except RepositoryWriteConflictError as exc:
+            logger.error("Unable to refresh trace span summaries: %s", exc)
+            raise MlflowException(
+                f"Concurrent span writes prevented refreshing trace '{exc.args[0]}'. "
+                "Retry log_spans to refresh its summary; stored spans are deduplicated.",
+                TEMPORARILY_UNAVAILABLE,
+            ) from None
+
     @staticmethod
     def _span_attribute_value(value: Any) -> Any:
         # Span.to_dict() retains MLflow's JSON-encoded OTel attribute values.
@@ -1238,6 +1328,185 @@ class MongoDBTrackingStore(AbstractStore):
         ):
             return None
         return value
+
+    @staticmethod
+    def _add_span_trace_tag(tags: dict[str, str], key: str, value: Any) -> None:
+        try:
+            value = value if isinstance(value, str) else json.dumps(value)
+            key, value = _validate_trace_tag(key, value)
+        except (MlflowException, TypeError, ValueError):
+            logger.debug("Skipping invalid span-derived trace tag %r", key)
+            return
+        tags[key] = value
+
+    @staticmethod
+    def _span_preview(value: Any, role: str) -> str | None:
+        try:
+            if value is not None and not isinstance(value, (str, dict)):
+                value = json.dumps(value)
+            preview = _get_truncated_preview(value, role=role)
+            # MLflow's helper consults the process-global URI for its size limit.
+            # A direct MongoDB store always uses the OSS limit, even in mixed clients.
+            if preview is not None and len(preview) > TRACE_REQUEST_RESPONSE_PREVIEW_MAX_LENGTH_OSS:
+                return preview[: TRACE_REQUEST_RESPONSE_PREVIEW_MAX_LENGTH_OSS - 3] + "..."
+            return preview
+        except (TypeError, ValueError, AttributeError) as exc:
+            logger.debug("Could not extract the %s trace preview: %s", role, exc)
+            return None
+
+    @classmethod
+    def _span_to_document(cls, span: Span) -> dict[str, Any]:
+        """Keep full span content plus compact native fields for summary queries."""
+
+        content = translate_span_when_storing(span)
+        attributes = content.get("attributes", {})
+        root = span.parent_id is None
+        resource_tags = {}
+        resource = getattr(span._span, "resource", None)
+        if resource is not None:
+            for key, value in resource.attributes.items():
+                if not key.startswith(("telemetry.sdk.", "mlflow.")):
+                    cls._add_span_trace_tag(resource_tags, key, value)
+        root_tags = {}
+        if root:
+            for key, value in attributes.items():
+                if key.startswith(SPAN_TRACE_TAG_PREFIX):
+                    tag_key = key[len(SPAN_TRACE_TAG_PREFIX) :]
+                    if tag_key not in (SPANS_LOCATION_TAG, MLFLOW_ARTIFACT_LOCATION):
+                        cls._add_span_trace_tag(
+                            root_tags, tag_key, cls._span_attribute_value(value)
+                        )
+
+        metadata = {}
+        session_id = attributes.get(SPAN_SESSION_ATTRIBUTE) or attributes.get(
+            CONVERSATION_ID_ATTRIBUTE
+        )
+        for key, value in (
+            (TraceMetadataKey.TRACE_SESSION, session_id),
+            (TraceMetadataKey.TRACE_USER, attributes.get(SPAN_USER_ATTRIBUTE)),
+        ):
+            if value is not None:
+                metadata[key] = str(cls._span_attribute_value(value))
+
+        return {
+            "trace_id": span.trace_id,
+            "span_id": span.span_id,
+            "parent_span_id": span.parent_id,
+            "name": span.name,
+            "type": cls._span_attribute_value(attributes.get(SpanAttributeKey.SPAN_TYPE))
+            or span.span_type,
+            "status": span.status.status_code.value,
+            "start_time_ns": span.start_time_ns,
+            "end_time_ns": span.end_time_ns,
+            "content": content,
+            "dimension_attributes": {
+                field: cls._span_attribute_value(attributes[attribute])
+                for field, attribute in (
+                    (SpanDimensionKey.MODEL, SPAN_MODEL_ATTRIBUTE),
+                    (SpanDimensionKey.MODEL_PROVIDER, SPAN_PROVIDER_ATTRIBUTE),
+                )
+                if attribute in attributes
+            },
+            "token_usage": cls._numeric_trace_stats(attributes.get(SpanAttributeKey.CHAT_USAGE)),
+            "cost": cls._numeric_trace_stats(attributes.get(SPAN_COST_ATTRIBUTE)),
+            "trace_fields": {
+                "metadata": metadata,
+                "resource_tags": resource_tags,
+                "root_tags": root_tags,
+                "request_preview": cls._span_preview(
+                    attributes.get(SpanAttributeKey.INPUTS), "user"
+                )
+                if root
+                else None,
+                "response_preview": cls._span_preview(
+                    attributes.get(SpanAttributeKey.OUTPUTS), "assistant"
+                )
+                if root
+                else None,
+            },
+        }
+
+    @staticmethod
+    def _summarize_spans(documents: list[SpanSummaryRecord]) -> dict[str, Any]:
+        """Recompute from unique persisted spans, including parents arriving in later batches."""
+
+        start_ms = min(document.start_time_ns for document in documents) // 1_000_000
+        end_times = [d.end_time_ns for d in documents if d.end_time_ns is not None]
+        root = next((d for d in documents if d.parent_span_id is None), None)
+        metadata = {}
+        tags = {}
+        for document in documents:
+            for key, value in document.trace_fields["metadata"].items():
+                metadata.setdefault(key, value)
+            for key, value in document.trace_fields["resource_tags"].items():
+                tags.setdefault(key, value)
+        if root:
+            tags.update(root.trace_fields["root_tags"])
+
+        if not root:
+            state = TraceState.IN_PROGRESS.value
+        elif root.status == SpanStatusCode.ERROR.value:
+            state = TraceState.ERROR.value
+        else:
+            state = TraceState.OK.value
+
+        token_usage, cost = aggregate_span_summaries(documents)
+        return {
+            "request_time": start_ms,
+            "execution_duration": max(end_times) // 1_000_000 - start_ms if end_times else None,
+            "state": state,
+            "request_preview": root.trace_fields["request_preview"] if root else None,
+            "response_preview": root.trace_fields["response_preview"] if root else None,
+            "tags": tags,
+            "metadata": metadata,
+            "token_usage": token_usage,
+            "cost": cost,
+        }
+
+    @classmethod
+    def _prepare_span_documents(
+        cls,
+        spans: list[Span],
+    ) -> tuple[list[dict[str, Any]], defaultdict[str, list[dict[str, Any]]]]:
+        # First delivery wins, including repeated identities in the same batch.
+        # Prepare documents before creating placeholders; the driver validates BSON on write.
+        documents_by_identity = {}
+        for span in spans:
+            identity = (span.trace_id, span.span_id)
+            if identity not in documents_by_identity:
+                documents_by_identity[identity] = cls._span_to_document(span)
+
+        documents_by_trace = defaultdict(list)
+        for document in documents_by_identity.values():
+            documents_by_trace[document["trace_id"]].append(document)
+        return list(documents_by_identity.values()), documents_by_trace
+
+    @retry_on_exception(RepositoryWriteConflictError, attempts=3, backoff_seconds=(0.01, 0.05))
+    def _refresh_trace_span_summary(self, trace_id: str, experiment_id: str) -> None:
+        revision, documents = self._trace_repository.span_summary_snapshot(
+            trace_id=trace_id, experiment_id=experiment_id
+        )
+        if not documents:
+            # Span deletion precedes trace deletion; do not finalize an empty
+            # snapshot or invent a successful write while deletion is in progress.
+            raise RepositoryNotFoundError(trace_id)
+        summary = self._summarize_spans(documents)
+        # MLflow's trace_metadata contract requires strings. The corresponding
+        # native fields are stored in the same atomic update for MongoDB queries.
+        summary["aggregate_metadata"] = {
+            key: json.dumps(summary[field])
+            for field, key in (
+                ("token_usage", TraceMetadataKey.TOKEN_USAGE),
+                ("cost", TRACE_COST_METADATA),
+            )
+            if summary[field] is not None
+        }
+        self._trace_repository.update_span_summary(
+            trace_id=trace_id, experiment_id=experiment_id, revision=revision, summary=summary
+        )
+
+    async def log_spans_async(self, location: str, spans: list[Span]) -> list[Span]:
+        return await asyncio.to_thread(self.log_spans, location, spans)
 
     @handle_persistence_error("Unable to set trace tag.", logger=logger)
     def set_trace_tag(self, trace_id: str, key: str, value: str) -> None:

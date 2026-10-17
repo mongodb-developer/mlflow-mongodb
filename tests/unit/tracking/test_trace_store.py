@@ -1,7 +1,9 @@
 """Trace lifecycle, span ingestion, and public error contracts."""
 
+import asyncio
 import json
-from unittest.mock import MagicMock, Mock
+import logging
+from unittest.mock import MagicMock, Mock, call
 
 import pytest
 from mlflow.entities import LifecycleStage
@@ -14,24 +16,33 @@ from mlflow.protos.databricks_pb2 import (
     INTERNAL_ERROR,
     INVALID_PARAMETER_VALUE,
     RESOURCE_DOES_NOT_EXIST,
+    TEMPORARILY_UNAVAILABLE,
     ErrorCode,
 )
 from mlflow.tracing.constant import (
+    TRACE_REQUEST_RESPONSE_PREVIEW_MAX_LENGTH_OSS,
+    SpanAttributeKey,
     TraceMetadataKey,
     TraceSizeStatsKey,
 )
+from opentelemetry.trace import StatusCode
 
 import mlflow_mongodb.tracking.store as store_module
 from mlflow_mongodb.infrastructure.errors import (
     RepositoryNotFoundError,
     RepositoryPersistenceError,
+    RepositoryWriteConflictError,
 )
 from mlflow_mongodb.tracking._compat import (  # ruff: ignore[import-private-name]
+    SPAN_COST_ATTRIBUTE,
+    SPAN_SESSION_ATTRIBUTE,
+    SPAN_TRACE_TAG_PREFIX,
     SPANS_LOCATION,
     SPANS_LOCATION_TAG,
     TRACE_COST_METADATA,
 )
 from mlflow_mongodb.tracking.store import MongoDBTrackingStore
+from mlflow_mongodb.tracking.types import SpanSummaryRecord
 
 TRACE_ID = "tr-0000000000000000000000000000002a"
 TIMESTAMP = 1_700_000_000_000
@@ -207,6 +218,43 @@ def test_get_trace_info_converts_metadata_and_assessments(
     assert info.assessments[0].valid is False
 
 
+@pytest.mark.parametrize("allow_partial", [False, True])
+def test_get_trace_sorts_root_first_then_time_and_identity(
+    trace_store, trace_repository, span_record_factory, allow_partial
+):
+    root = span_record_factory(span_id=1, start_time=2_000_000)
+    child = span_record_factory(span_id=3, parent_id=1, start_time=1_000_000)
+    sibling = span_record_factory(span_id=2, parent_id=1, start_time=1_000_000)
+    trace_repository.get_spans.return_value = [child, sibling, root]
+
+    trace = trace_store.get_trace(TRACE_ID, allow_partial=allow_partial)
+
+    assert [span.span_id for span in trace.data.spans] == [
+        root.span_id,
+        sibling.span_id,
+        child.span_id,
+    ]
+    trace_repository.get_trace_info.assert_called_once_with(TRACE_ID)
+    trace_repository.get_spans.assert_called_once_with(TRACE_ID)
+
+
+def test_get_trace_reloads_metadata_and_spans_after_incomplete_export(
+    trace_store, trace_repository, trace_record_factory, span_record_factory, monkeypatch
+):
+    sleep = Mock()
+    monkeypatch.setattr("mlflow_mongodb.infrastructure.retry.time.sleep", sleep)
+    root, child = span_record_factory(), span_record_factory(span_id=2, parent_id=1)
+    trace_repository.get_trace_info.return_value = trace_record_factory(span_stats={"num_spans": 2})
+    trace_repository.get_spans.side_effect = [[], [root], [root, child]]
+
+    trace = trace_store.get_trace(TRACE_ID)
+
+    assert len(trace.data.spans) == 2
+    assert trace_repository.get_trace_info.call_count == 3
+    assert trace_repository.get_spans.call_count == 3
+    assert sleep.call_args_list == [call(1), call(2)]
+
+
 def test_get_trace_reports_incomplete_export_after_bounded_retries(
     trace_store, trace_repository, monkeypatch
 ):
@@ -266,6 +314,292 @@ def test_batch_traces_empty_selection_avoids_repository(
     trace_repository.batch_get_traces.assert_not_called()
 
 
+def test_batch_traces_omits_empty_and_incomplete_exports(
+    trace_store, trace_repository, trace_record_factory, span_record_factory
+):
+    span = span_record_factory()
+    trace_repository.batch_get_traces.return_value = [
+        (trace_record_factory(_id="empty"), []),
+        (trace_record_factory(_id="partial", span_stats={"num_spans": 2}), [span]),
+        (trace_record_factory(), [span]),
+    ]
+    result = trace_store.batch_get_traces(["empty", "partial", TRACE_ID], experiment_ids=["42"])
+    assert [trace.info.trace_id for trace in result] == [TRACE_ID]
+    trace_repository.batch_get_traces.assert_called_once_with(
+        ["empty", "partial", TRACE_ID], experiment_ids=["42"]
+    )
+
+
+def test_log_spans_empty_batch_avoids_experiment_lookup(trace_store, experiment_repository):
+    assert trace_store.log_spans("", []) == []
+    experiment_repository.find_by_id.assert_not_called()
+
+
+@pytest.mark.parametrize("location", [None, "", 42])
+def test_log_spans_rejects_invalid_location_before_lookup(
+    trace_store, experiment_repository, span_factory, location
+):
+    with pytest.raises(MlflowException) as caught:
+        trace_store.log_spans(location, [span_factory()])
+    assert caught.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
+    experiment_repository.find_by_id.assert_not_called()
+
+
+def test_log_spans_rejects_deleted_experiment_before_writes(
+    trace_store, trace_repository, experiment_repository, experiment_record_factory, span_factory
+):
+    experiment_repository.find_by_id.return_value = experiment_record_factory(
+        lifecycle_stage=LifecycleStage.DELETED
+    )
+    with pytest.raises(MlflowException) as caught:
+        trace_store.log_spans("42", [span_factory()])
+    assert caught.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
+    trace_repository.ensure_traces.assert_not_called()
+    trace_repository.log_spans.assert_not_called()
+
+
+def test_log_spans_deduplicates_before_writing_and_refreshes_each_trace(
+    trace_store, trace_repository, span_factory, monkeypatch
+):
+    first = span_factory(span_id=1, start_time=4_000_000)
+    duplicate = span_factory(span_id=1, start_time=9_000_000)
+    child = span_factory(span_id=2, parent_id=1, start_time=2_000_000)
+    other = span_factory(span_id=1, trace_id="other", start_time=6_000_000)
+    refresh = Mock()
+    monkeypatch.setattr(trace_store, "_refresh_trace_span_summary", refresh)
+    spans = [first, duplicate, child, other]
+
+    assert trace_store.log_spans("42", spans) is spans
+
+    trace_repository.ensure_traces.assert_called_once_with(
+        experiment_id="42", request_times={TRACE_ID: 2, "other": 6}
+    )
+    documents = trace_repository.log_spans.call_args.args[0]
+    assert len(documents) == 3
+    assert documents[0]["start_time_ns"] == first.start_time_ns
+    assert refresh.call_args_list == [call(TRACE_ID, "42"), call("other", "42")]
+    assert [entry[0] for entry in trace_repository.method_calls] == ["ensure_traces", "log_spans"]
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("../team", "risk"),
+        ("invalid?key", "risk"),
+        ("team", {"unsupported-set"}),
+        ("team", object()),
+    ],
+)
+def test_invalid_span_trace_tag_is_skipped_without_changing_existing_tags(caplog, key, value):
+    tags = {"team": "original", "preserve": "yes"}
+
+    with caplog.at_level(logging.DEBUG, logger=store_module.logger.name):
+        MongoDBTrackingStore._add_span_trace_tag(tags, key, value)
+
+    assert tags == {"team": "original", "preserve": "yes"}
+    assert caplog.records[-1].message == f"Skipping invalid span-derived trace tag {key!r}"
+
+
+def test_circular_span_trace_tag_value_is_skipped_without_changing_existing_tags(caplog):
+    value = []
+    value.append(value)
+    tags = {"team": "original", "preserve": "yes"}
+
+    with caplog.at_level(logging.DEBUG, logger=store_module.logger.name):
+        MongoDBTrackingStore._add_span_trace_tag(tags, "team", value)
+
+    assert tags == {"team": "original", "preserve": "yes"}
+    assert caplog.records[-1].message == "Skipping invalid span-derived trace tag 'team'"
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (["hello", 1], '["hello", 1]'),
+        ((1, 2), "[1, 2]"),
+        ([], "[]"),
+        (42, "42"),
+        (0, "0"),
+        (1.5, "1.5"),
+        (True, "true"),
+        (False, "false"),
+    ],
+)
+def test_span_preview_json_encodes_non_string_non_dict_values(value, expected):
+    assert MongoDBTrackingStore._span_preview(value, "user") == expected
+
+
+def test_span_preview_caps_oversized_helper_result_at_oss_limit(monkeypatch):
+    limit = TRACE_REQUEST_RESPONSE_PREVIEW_MAX_LENGTH_OSS
+    oversized = "x" * (limit + 10)
+    extract_preview = Mock(return_value=oversized)
+    monkeypatch.setattr(store_module, "_get_truncated_preview", extract_preview)
+
+    preview = MongoDBTrackingStore._span_preview("request", "user")
+
+    assert preview == "x" * (limit - 3) + "..."
+    assert len(preview) == limit
+    extract_preview.assert_called_once_with("request", role="user")
+
+
+@pytest.mark.parametrize("error_type", [TypeError, ValueError, AttributeError])
+def test_span_preview_extraction_failure_returns_none_and_logs_debug(
+    monkeypatch, caplog, error_type
+):
+    error = error_type("Invalid preview content")
+    extract_preview = Mock(side_effect=error)
+    monkeypatch.setattr(store_module, "_get_truncated_preview", extract_preview)
+
+    with caplog.at_level(logging.DEBUG, logger=store_module.logger.name):
+        result = MongoDBTrackingStore._span_preview("request", "user")
+
+    assert result is None
+    extract_preview.assert_called_once_with("request", role="user")
+    assert caplog.records[-1].levelno == logging.DEBUG
+    assert caplog.records[-1].msg == "Could not extract the %s trace preview: %s"
+    assert caplog.records[-1].args == ("user", error)
+
+
+def test_span_document_retains_encoded_payload_and_extracts_native_query_values(span_factory):
+    span = span_factory(
+        attributes={
+            SpanAttributeKey.CHAT_USAGE: {"input_tokens": 4},
+            SPAN_COST_ATTRIBUTE: {"total_cost": 0.2},
+            SPAN_SESSION_ATTRIBUTE: "session",
+            SPAN_TRACE_TAG_PREFIX + "team": "root",
+        },
+        resource_attributes={"team": "resource", "telemetry.sdk.name": "ignored"},
+    )
+    document = MongoDBTrackingStore._span_to_document(span)
+    assert document["token_usage"] == {"input_tokens": 4}
+    assert document["cost"] == {"total_cost": 0.2}
+    assert isinstance(document["content"]["attributes"][SpanAttributeKey.CHAT_USAGE], str)
+    assert document["trace_fields"]["metadata"][TraceMetadataKey.TRACE_SESSION] == "session"
+    assert document["trace_fields"]["resource_tags"] == {"team": "resource"}
+    assert document["trace_fields"]["root_tags"] == {"team": "root"}
+
+
+@pytest.mark.parametrize(
+    ("parent_id", "status", "state"),
+    [
+        (None, StatusCode.OK, "OK"),
+        (None, StatusCode.ERROR, "ERROR"),
+        (9, StatusCode.OK, "IN_PROGRESS"),
+    ],
+)
+def test_summary_uses_root_state_and_persisted_time_bounds(span_factory, parent_id, status, state):
+    span = span_factory(parent_id=parent_id, status=status)
+    document = MongoDBTrackingStore._span_to_document(span)
+    summary = MongoDBTrackingStore._summarize_spans([SpanSummaryRecord.from_document(document)])
+    assert summary["state"] == state
+    assert summary["request_time"] == 1
+    assert summary["execution_duration"] == 10
+
+
+def test_summary_root_tags_override_resource_tags(span_factory):
+    root = span_factory(
+        attributes={SPAN_TRACE_TAG_PREFIX + "team": "root"},
+        resource_attributes={"team": "resource"},
+    )
+    child = span_factory(span_id=2, parent_id=1, resource_attributes={"other": "value"})
+    records = [
+        SpanSummaryRecord.from_document(MongoDBTrackingStore._span_to_document(span))
+        for span in (root, child)
+    ]
+    assert MongoDBTrackingStore._summarize_spans(records)["tags"] == {
+        "team": "root",
+        "other": "value",
+    }
+
+
+def test_summary_does_not_count_usage_twice_when_parent_arrives_later(span_factory):
+    child = span_factory(
+        span_id=2,
+        parent_id=1,
+        attributes={
+            SpanAttributeKey.CHAT_USAGE: {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}
+        },
+    )
+    parent = span_factory(
+        attributes={
+            SpanAttributeKey.CHAT_USAGE: {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}
+        }
+    )
+    records = [
+        SpanSummaryRecord.from_document(MongoDBTrackingStore._span_to_document(span))
+        for span in (child, parent)
+    ]
+    assert MongoDBTrackingStore._summarize_spans(records)["token_usage"] == {
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "total_tokens": 5,
+    }
+
+
+def test_refresh_retries_with_new_snapshot_after_revision_conflict(
+    trace_store, trace_repository, span_factory, monkeypatch
+):
+    monkeypatch.setattr("mlflow_mongodb.infrastructure.retry.time.sleep", Mock())
+    summary_record = SpanSummaryRecord.from_document(
+        trace_store._span_to_document(
+            span_factory(attributes={SpanAttributeKey.CHAT_USAGE: {"input_tokens": 4}})
+        )
+    )
+    trace_repository.span_summary_snapshot.side_effect = [
+        (1, [summary_record]),
+        (2, [summary_record]),
+    ]
+    trace_repository.update_span_summary.side_effect = [
+        RepositoryWriteConflictError(TRACE_ID),
+        None,
+    ]
+
+    trace_store._refresh_trace_span_summary(TRACE_ID, "42")
+
+    assert trace_repository.span_summary_snapshot.call_count == 2
+    updates = trace_repository.update_span_summary.call_args_list
+    assert [entry.kwargs["revision"] for entry in updates] == [1, 2]
+    summary = updates[-1].kwargs["summary"]
+    assert summary["token_usage"]["input_tokens"] == 4
+    assert (
+        json.loads(summary["aggregate_metadata"][TraceMetadataKey.TOKEN_USAGE])
+        == summary["token_usage"]
+    )
+
+
+def test_refresh_empty_snapshot_does_not_finalize_trace(trace_store, trace_repository):
+    trace_repository.span_summary_snapshot.return_value = (1, [])
+    with pytest.raises(RepositoryNotFoundError):
+        trace_store._refresh_trace_span_summary(TRACE_ID, "42")
+    trace_repository.update_span_summary.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        (RepositoryNotFoundError(TRACE_ID), RESOURCE_DOES_NOT_EXIST),
+        (RepositoryWriteConflictError(TRACE_ID), TEMPORARILY_UNAVAILABLE),
+    ],
+)
+def test_ingestion_summary_domain_errors_have_distinct_public_codes(
+    trace_store, span_factory, monkeypatch, error, code
+):
+    monkeypatch.setattr(trace_store, "_refresh_trace_span_summary", Mock(side_effect=error))
+    with pytest.raises(MlflowException) as caught:
+        trace_store.log_spans("42", [span_factory()])
+    assert caught.value.error_code == ErrorCode.Name(code)
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True
+
+
+def test_async_span_ingestion_delegates_to_sync_store(trace_store, span_factory, monkeypatch):
+    spans = [span_factory()]
+    log_spans = Mock(return_value=spans)
+    monkeypatch.setattr(trace_store, "log_spans", log_spans)
+    assert asyncio.run(trace_store.log_spans_async("42", spans)) is spans
+    log_spans.assert_called_once_with("42", spans)
+
+
 def test_trace_repository_initialization_is_cached(trace_store, trace_repository, monkeypatch):
     trace_store.__dict__.pop("_trace_repository")
     database = MagicMock()
@@ -291,6 +625,29 @@ def test_trace_repository_initialization_failure_is_logged_once(trace_store, mon
     assert len(records) == 1
     assert records[0].args == (error,)
     assert records[0].exc_info is None
+
+
+@pytest.mark.parametrize(
+    "stage", ["ensure_traces", "log_spans", "span_summary_snapshot", "update_span_summary"]
+)
+def test_span_ingestion_translates_failure_at_each_persistence_stage(
+    trace_store, trace_repository, span_factory, caplog, stage
+):
+    span = span_factory()
+    summary_record = SpanSummaryRecord.from_document(trace_store._span_to_document(span))
+    trace_repository.span_summary_snapshot.return_value = (1, [summary_record])
+    error = RepositoryPersistenceError("Private write details")
+    getattr(trace_repository, stage).side_effect = error
+
+    with pytest.raises(MlflowException) as caught:
+        trace_store.log_spans("42", [span])
+
+    assert caught.value.message == "Unable to log spans."
+    assert caught.value.error_code == ErrorCode.Name(INTERNAL_ERROR)
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True
+    assert caplog.records[-1].args == (error,)
+    assert caplog.records[-1].exc_info is None
 
 
 def test_set_trace_tag_passes_literal_value(trace_store, trace_repository):

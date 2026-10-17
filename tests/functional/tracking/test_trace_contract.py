@@ -1,7 +1,10 @@
 """Trace creation, span ingestion, retrieval, and deletion against MongoDB."""
 
+import asyncio
 import json
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from threading import Barrier
 
 import pytest
 from mlflow.entities.assessment import Expectation
@@ -11,12 +14,17 @@ from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import RESOURCE_DOES_NOT_EXIST, ErrorCode
 from mlflow.protos.service_pb2 import LinkTracesToRun
 from mlflow.tracing.constant import (
+    SpanAttributeKey,
     TraceMetadataKey,
     TraceSizeStatsKey,
 )
 from mlflow.utils.mlflow_tags import MLFLOW_ARTIFACT_LOCATION
+from opentelemetry.trace import StatusCode
 
 from mlflow_mongodb.tracking._compat import (  # ruff: ignore[import-private-name]
+    SPAN_COST_ATTRIBUTE,
+    SPAN_SESSION_ATTRIBUTE,
+    SPAN_TRACE_TAG_PREFIX,
     SPANS_LOCATION,
     SPANS_LOCATION_TAG,
     TRACE_COST_METADATA,
@@ -74,6 +82,152 @@ def test_start_trace_round_trips_metadata_and_native_assessment_values(store, tr
         {"trace_id": info.trace_id}
     )
     assert assessment["content"]["expectation"] == {"value": {"answer": [1, True]}}
+
+
+@pytest.mark.parametrize(
+    "status,expected_state", [(StatusCode.OK, TraceState.OK), (StatusCode.ERROR, TraceState.ERROR)]
+)
+def test_child_first_delivery_creates_placeholder_and_late_root_refreshes_summary(
+    store, trace_info_factory, span_factory, status, expected_state
+):
+    info = trace_info_factory()
+    child = span_factory(
+        trace_id=info.trace_id,
+        span_id=2,
+        parent_id=1,
+        attributes={
+            SpanAttributeKey.CHAT_USAGE: {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
+        },
+    )
+    root = span_factory(
+        trace_id=info.trace_id,
+        status=status,
+        attributes={
+            SPAN_TRACE_TAG_PREFIX + "team": "$root",
+            SPAN_SESSION_ATTRIBUTE: "session",
+            SpanAttributeKey.CHAT_USAGE: {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
+            SpanAttributeKey.INPUTS: "question",
+            SpanAttributeKey.OUTPUTS: "answer",
+        },
+        resource_attributes={"team": "resource", "telemetry.sdk.name": "ignored"},
+    )
+
+    store.log_spans(info.experiment_id, [child])
+    assert store.get_trace_info(info.trace_id).state == TraceState.IN_PROGRESS
+    store.log_spans(info.experiment_id, [root, child])
+    result = store.get_trace(info.trace_id)
+
+    assert result.info.state == expected_state
+    assert result.info.request_time == root.start_time_ns // 1_000_000
+    assert result.info.execution_duration == 10
+    assert result.info.tags["team"] == "$root"
+    assert "telemetry.sdk.name" not in result.info.tags
+    assert result.info.trace_metadata[TraceMetadataKey.TRACE_SESSION] == "session"
+    assert json.loads(result.info.trace_metadata[TraceMetadataKey.TOKEN_USAGE]) == {
+        "input_tokens": 3,
+        "output_tokens": 2,
+        "total_tokens": 5,
+    }
+    assert [span.span_id for span in result.data.spans] == [root.span_id, child.span_id]
+    assert (
+        store._trace_repository._spans_collection.count_documents({"trace_id": info.trace_id}) == 2
+    )
+
+
+def test_concurrent_metadata_and_span_ingestion_preserve_one_complete_trace(
+    store, trace_info_factory, span_factory
+):
+    repository = store._trace_repository
+
+    def write_metadata(barrier, info):
+        barrier.wait()
+        return store.start_trace(info)
+
+    def write_spans(barrier, info, root):
+        barrier.wait()
+        return store.log_spans(info.experiment_id, [root])
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        for _ in range(8):
+            info = trace_info_factory(
+                tags={"team": "$metadata"},
+                trace_metadata={"source": "$authoritative"},
+            )
+            root = span_factory(trace_id=info.trace_id)
+            barrier = Barrier(2, timeout=10)
+
+            metadata = executor.submit(write_metadata, barrier, info)
+            spans = executor.submit(write_spans, barrier, info, root)
+            assert metadata.result(timeout=30).trace_id == info.trace_id
+            assert spans.result(timeout=30) == [root]
+
+            loaded = store.get_trace(info.trace_id)
+            assert loaded.info.experiment_id == info.experiment_id
+            assert loaded.info.tags["team"] == "$metadata"
+            assert loaded.info.trace_metadata["source"] == "$authoritative"
+            assert loaded.info.state == TraceState.OK
+            assert [item.span_id for item in loaded.data.spans] == [root.span_id]
+            assert repository._collection.count_documents({"_id": info.trace_id}) == 1
+            assert repository._spans_collection.count_documents({"trace_id": info.trace_id}) == 1
+            document = repository._collection.find_one({"_id": info.trace_id})
+            assert document["trace_info_finalized"] is True
+
+
+def test_span_summary_preserves_authoritative_trace_fields(store, trace_info_factory, span_factory):
+    info = trace_info_factory(
+        request_time=1000,
+        execution_duration=77,
+        request_preview="explicit",
+        tags={"team": "explicit"},
+        trace_metadata={
+            TraceMetadataKey.TOKEN_USAGE: '{"input_tokens": 20}',
+            TRACE_COST_METADATA: '{"total_cost": 0.5}',
+        },
+    )
+    store.start_trace(info)
+    root = span_factory(
+        trace_id=info.trace_id,
+        status=StatusCode.ERROR,
+        attributes={
+            SPAN_TRACE_TAG_PREFIX + "team": "derived",
+            SPAN_TRACE_TAG_PREFIX + "new": "$value",
+            SpanAttributeKey.CHAT_USAGE: {"input_tokens": 3},
+            SPAN_COST_ATTRIBUTE: {"total_cost": 0.1},
+        },
+    )
+
+    store.log_spans(info.experiment_id, [root])
+
+    loaded = store.get_trace_info(info.trace_id)
+    assert loaded.state == TraceState.OK
+    assert loaded.request_time == 1000
+    assert loaded.execution_duration == 77
+    assert loaded.request_preview == "explicit"
+    assert loaded.tags["team"] == "explicit"
+    assert loaded.tags["new"] == "$value"
+    assert loaded.trace_metadata[TraceMetadataKey.TOKEN_USAGE] == '{"input_tokens": 20}'
+    assert loaded.trace_metadata[TRACE_COST_METADATA] == '{"total_cost": 0.5}'
+    document = store._trace_repository._collection.find_one({"_id": info.trace_id})
+    assert document["token_usage"] == {"input_tokens": 20}
+    assert document["cost"] == {"total_cost": 0.5}
+
+
+def test_batch_complete_reads_omit_empty_and_partially_exported_traces(
+    store, trace_info_factory, span_factory
+):
+    empty = store.start_trace(trace_info_factory())
+    partial = store.start_trace(
+        trace_info_factory(trace_metadata={TraceMetadataKey.SIZE_STATS: '{"num_spans": 2}'})
+    )
+    complete = store.start_trace(trace_info_factory())
+    for info in (partial, complete):
+        store.log_spans(info.experiment_id, [span_factory(trace_id=info.trace_id)])
+
+    result = store.batch_get_traces([empty.trace_id, partial.trace_id, complete.trace_id])
+
+    assert [trace.info.trace_id for trace in result] == [complete.trace_id]
+    assert len(store.get_trace(partial.trace_id, allow_partial=True).data.spans) == 1
+    assert store.get_trace(empty.trace_id, allow_partial=True).data.spans == []
 
 
 def test_trace_tags_and_links_are_idempotent_and_preserve_literal_values(store, trace):
@@ -139,3 +293,12 @@ def test_deleting_missing_trace_tag_returns_not_found_and_preserves_existing_tra
     assert caught.value.__cause__ is None
     assert store.get_trace_info(trace.trace_id) == trace
     assert store._trace_repository._collection.count_documents({"_id": "tr-missing"}) == 0
+
+
+def test_async_span_ingestion_persists_readable_trace(store, trace, span_factory):
+    span = span_factory(trace_id=trace.trace_id)
+
+    result = asyncio.run(store.log_spans_async(trace.experiment_id, [span]))
+
+    assert result == [span]
+    assert store.get_trace(trace.trace_id).data.spans[0].span_id == span.span_id

@@ -56,6 +56,11 @@ MLflow's existing artifact storage. Configure a reachable experiment artifact lo
 such as S3 or an MLflow artifact proxy. The MongoDB store returns the trace artifact URI;
 it does not implement its own artifact provider or upload the payload itself.
 
+On MLflow 3.5 servers, trace retrieval uses artifacts while spans are also persisted in
+MongoDB. On MLflow 3.6 and newer servers, modern clients use MongoDB-backed trace retrieval.
+A 3.5 client cannot read a trace written only to MongoDB by a modern client unless an
+artifact payload also exists. Cross-version reads of that kind are not guaranteed.
+
 ## Documentation
 
 New to MLflow? Start with the [MLflow Tracking Quickstart](https://mlflow.org/docs/latest/ml/getting-started/quickstart/).

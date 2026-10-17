@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
@@ -7,7 +8,12 @@ from uuid import uuid4
 
 import pytest
 from mlflow.entities import TraceInfo, TraceLocation, TraceState
+from mlflow.entities.span import Span
+from mlflow.tracing.constant import SpanAttributeKey
 from mlflow.tracking._tracking_service.utils import _get_store  # ruff: ignore[import-private-name]
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import ReadableSpan
+from opentelemetry.trace import SpanContext, Status, StatusCode
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
 
@@ -139,3 +145,38 @@ def trace_info_factory(store):
 @pytest.fixture
 def trace(store, trace_info_factory):
     return store.start_trace(trace_info_factory())
+
+
+@pytest.fixture
+def span_factory():
+    def factory(
+        *,
+        trace_id,
+        span_id=1,
+        parent_id=None,
+        start_time=1_700_000_000_000_000_000,
+        end_time=1_700_000_000_010_000_000,
+        status=StatusCode.OK,
+        attributes=None,
+        resource_attributes=None,
+    ):
+        values = {SpanAttributeKey.REQUEST_ID: trace_id, SpanAttributeKey.SPAN_TYPE: "CHAIN"}
+        values.update(attributes or {})
+        return Span(
+            ReadableSpan(
+                name=f"span-{span_id}",
+                context=SpanContext(trace_id=42, span_id=span_id, is_remote=False),
+                parent=(
+                    SpanContext(trace_id=42, span_id=parent_id, is_remote=False)
+                    if parent_id is not None
+                    else None
+                ),
+                start_time=start_time,
+                end_time=end_time,
+                status=Status(status),
+                attributes={key: json.dumps(value) for key, value in values.items()},
+                resource=Resource(resource_attributes or {}),
+            )
+        )
+
+    return factory

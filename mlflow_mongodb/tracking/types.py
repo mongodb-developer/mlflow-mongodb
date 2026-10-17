@@ -2,7 +2,14 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final
+
+
+class SpanDimensionKey:
+    """Internal field names for queryable span model attributes."""
+
+    MODEL: Final = "model"
+    MODEL_PROVIDER: Final = "provider"
 
 
 @dataclass(frozen=True)
@@ -110,6 +117,33 @@ class SpanRecord:
             start_time_ns=document["start_time_ns"],
             end_time_ns=document.get("end_time_ns"),
             content=document["content"],
+        )
+
+
+@dataclass(frozen=True)
+class SpanSummaryRecord:
+    """Span fields needed to recompute a trace summary."""
+
+    span_id: str
+    parent_span_id: str | None
+    status: str
+    start_time_ns: int
+    end_time_ns: int | None
+    token_usage: dict[str, Any] | None
+    cost: dict[str, Any] | None
+    trace_fields: dict[str, Any]
+
+    @classmethod
+    def from_document(cls, document: Mapping[str, Any]) -> "SpanSummaryRecord":
+        return cls(
+            span_id=document["span_id"],
+            parent_span_id=document.get("parent_span_id"),
+            status=document["status"],
+            start_time_ns=document["start_time_ns"],
+            end_time_ns=document.get("end_time_ns"),
+            token_usage=document.get("token_usage"),
+            cost=document.get("cost"),
+            trace_fields=document.get("trace_fields", {}),
         )
 
 

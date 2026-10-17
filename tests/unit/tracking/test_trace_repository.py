@@ -5,9 +5,10 @@ from unittest.mock import MagicMock, Mock, call
 import pytest
 from bson.errors import InvalidDocument
 from pymongo import ReturnDocument
-from pymongo.errors import DuplicateKeyError, OperationFailure
+from pymongo.errors import BulkWriteError, DuplicateKeyError, OperationFailure
 
 from mlflow_mongodb.infrastructure.errors import (
+    RepositoryNotFoundError,
     RepositoryPersistenceError,
     RepositoryWriteConflictError,
 )
@@ -172,6 +173,152 @@ def test_trace_upsert_does_not_retry_other_database_errors(repository, collectio
     assert collections["traces"].find_one_and_update.call_count == 1
 
 
+def test_ensure_traces_empty_request_times_skips_bulk_write(repository, collections):
+    assert repository.ensure_traces(experiment_id="42", request_times={}) is None
+    collections["traces"].bulk_write.assert_not_called()
+
+
+def test_ensure_traces_retries_only_failed_operations_using_each_batch_indexes(
+    repository, collections
+):
+    collection = collections["traces"]
+    first_error = BulkWriteError(
+        {
+            "writeErrors": [
+                {"index": 1, "code": 11000, "keyPattern": {"_id": 1}},
+                {"index": 3, "code": 11000, "keyPattern": {"_id": 1}},
+            ]
+        }
+    )
+    second_error = BulkWriteError(
+        {
+            "writeErrors": [
+                {"index": 1, "code": 11000, "keyPattern": {"_id": 1}},
+            ]
+        }
+    )
+    collection.bulk_write.side_effect = [first_error, second_error, Mock()]
+    request_times = {f"tr-{index}": index for index in range(4)}
+
+    repository.ensure_traces(experiment_id="42", request_times=request_times)
+
+    calls = collection.bulk_write.call_args_list
+    assert len(calls) == 3
+    initial_operations = calls[0].args[0]
+    assert len(initial_operations) == 4
+    assert calls[1].args[0] == [initial_operations[1], initial_operations[3]]
+    assert calls[2].args[0] == [initial_operations[3]]
+    assert all(entry.kwargs == {"ordered": False} for entry in calls)
+    assert request_times == {f"tr-{index}": index for index in range(4)}
+
+
+def test_ensure_traces_stops_after_three_duplicate_id_failures(repository, collections):
+    error = BulkWriteError(
+        {
+            "writeErrors": [
+                {"index": 0, "code": 11000, "keyPattern": {"_id": 1}},
+            ]
+        }
+    )
+    collections["traces"].bulk_write.side_effect = error
+
+    with pytest.raises(RepositoryPersistenceError) as caught:
+        repository.ensure_traces(experiment_id="42", request_times={TRACE_ID: 1})
+
+    assert collections["traces"].bulk_write.call_count == 3
+    assert str(caught.value) == "Unable to create trace placeholders."
+    assert caught.value.__cause__ is error
+
+
+@pytest.mark.parametrize(
+    "details",
+    [
+        pytest.param({"writeErrors": []}, id="no-write-errors"),
+        pytest.param({"writeErrors": [{"index": 0, "code": 121}]}, id="validation-error"),
+        pytest.param(
+            {
+                "writeErrors": [
+                    {"index": 0, "code": 11000, "keyPattern": {"name": 1}},
+                ]
+            },
+            id="different-unique-index",
+        ),
+        pytest.param({"writeErrors": [{"index": 0, "code": 11000}]}, id="unknown-index"),
+        pytest.param(
+            {
+                "writeErrors": [
+                    {"index": 0, "code": 11000, "keyPattern": {"_id": 1}},
+                    {"index": 1, "code": 121},
+                ]
+            },
+            id="mixed-write-errors",
+        ),
+        pytest.param(
+            {
+                "writeErrors": [
+                    {"index": 0, "code": 11000, "keyPattern": {"_id": 1}},
+                ],
+                "writeConcernErrors": [{"code": 64, "errmsg": "Private write concern details"}],
+            },
+            id="write-concern-error",
+        ),
+    ],
+)
+def test_ensure_traces_does_not_retry_non_identity_bulk_failures(repository, collections, details):
+    error = BulkWriteError(details)
+    collections["traces"].bulk_write.side_effect = error
+
+    with pytest.raises(RepositoryPersistenceError) as caught:
+        repository.ensure_traces(experiment_id="42", request_times={TRACE_ID: 1, "tr-other": 2})
+
+    assert collections["traces"].bulk_write.call_count == 1
+    assert caught.value.__cause__ is error
+
+
+@pytest.mark.parametrize("error_type", [OperationFailure, InvalidDocument])
+def test_ensure_traces_does_not_retry_driver_or_encoding_failures(
+    repository, collections, error_type
+):
+    error = error_type("Private placeholder details")
+    collections["traces"].bulk_write.side_effect = error
+
+    with pytest.raises(RepositoryPersistenceError) as caught:
+        repository.ensure_traces(experiment_id="42", request_times={TRACE_ID: 1})
+
+    assert collections["traces"].bulk_write.call_count == 1
+    assert caught.value.__cause__ is error
+
+
+def test_ensure_traces_stops_if_a_retry_has_a_different_failure(repository, collections):
+    duplicate = BulkWriteError(
+        {
+            "writeErrors": [
+                {"index": 1, "code": 11000, "keyPattern": {"_id": 1}},
+            ]
+        }
+    )
+    failure = OperationFailure("Private retry details")
+    collection = collections["traces"]
+    collection.bulk_write.side_effect = [duplicate, failure]
+
+    with pytest.raises(RepositoryPersistenceError) as caught:
+        repository.ensure_traces(experiment_id="42", request_times={TRACE_ID: 1, "tr-other": 2})
+
+    assert collection.bulk_write.call_count == 2
+    assert caught.value.__cause__ is failure
+    calls = collection.bulk_write.call_args_list
+    assert calls[1].args[0] == [calls[0].args[0][1]]
+
+
+@pytest.mark.parametrize("error_type", [OperationFailure, InvalidDocument, OverflowError])
+def test_span_write_translates_encoding_and_driver_errors(repository, collections, error_type):
+    error = error_type("Private span details")
+    collections["spans"].bulk_write.side_effect = error
+    with pytest.raises(RepositoryPersistenceError) as caught:
+        repository.log_spans([{"trace_id": TRACE_ID, "span_id": "span"}])
+    assert caught.value.__cause__ is error
+
+
 def test_empty_trace_run_links_skip_database_update(repository, collections):
     assert repository.link_traces_to_run(trace_ids=[], run_id="run") is None
     collections["traces"].update_many.assert_not_called()
@@ -180,6 +327,43 @@ def test_empty_trace_run_links_skip_database_update(repository, collections):
 def test_empty_prompt_links_skip_database_update(repository, collections):
     assert repository.link_prompts(trace_id=TRACE_ID, prompt_versions=[]) is None
     collections["traces"].find_one_and_update.assert_not_called()
+
+
+def test_empty_span_write_does_not_call_database(repository, collections):
+    repository.log_spans([])
+    collections["spans"].bulk_write.assert_not_called()
+
+
+def test_snapshot_missing_trace_does_not_read_spans(repository, collections):
+    collections["traces"].find_one_and_update.return_value = None
+    with pytest.raises(RepositoryNotFoundError):
+        repository.span_summary_snapshot(trace_id=TRACE_ID, experiment_id="42")
+    collections["spans"].find.assert_not_called()
+
+
+def test_revision_conflict_is_distinct_from_persistence_failure(repository, collections):
+    collections["traces"].update_one.return_value.matched_count = 0
+    summary = {
+        "state": "OK",
+        "tags": {},
+        "metadata": {},
+        "request_time": 1,
+        "execution_duration": 2,
+        "request_preview": None,
+        "response_preview": None,
+        "token_usage": None,
+        "cost": None,
+    }
+    with pytest.raises(RepositoryWriteConflictError) as caught:
+        repository.update_span_summary(
+            trace_id=TRACE_ID, experiment_id="42", revision=3, summary=summary
+        )
+    assert caught.value.args == (TRACE_ID,)
+    assert collections["traces"].update_one.call_args.args[0] == {
+        "_id": TRACE_ID,
+        "experiment_id": "42",
+        "span_revision": 3,
+    }
 
 
 def test_partial_batch_read_failure_closes_cursor_and_preserves_cause(
@@ -211,6 +395,18 @@ def test_partial_span_read_failure_closes_cursor_and_preserves_cause(
     collections["spans"].find.return_value = cursor
     with pytest.raises(RepositoryPersistenceError) as caught:
         repository.get_spans(TRACE_ID)
+    assert caught.value.__cause__ is error
+    assert cursor.__exit__.call_count == 1
+
+
+def test_partial_snapshot_failure_closes_cursor_and_preserves_cause(
+    repository, collections, failing_cursor
+):
+    cursor, error = failing_cursor
+    collections["traces"].find_one_and_update.return_value = {"span_revision": 1}
+    collections["spans"].find.return_value = cursor
+    with pytest.raises(RepositoryPersistenceError) as caught:
+        repository.span_summary_snapshot(trace_id=TRACE_ID, experiment_id="42")
     assert caught.value.__cause__ is error
     assert cursor.__exit__.call_count == 1
 

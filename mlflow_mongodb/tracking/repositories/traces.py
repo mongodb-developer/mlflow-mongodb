@@ -6,9 +6,12 @@ from collections.abc import Mapping
 from typing import Any
 
 from bson.errors import BSONError
-from pymongo import ASCENDING, DESCENDING, ReplaceOne, ReturnDocument
+from mlflow.entities.trace_state import TraceState
+from mlflow.tracing.constant import TraceMetadataKey
+from pymongo import ASCENDING, DESCENDING, ReplaceOne, ReturnDocument, UpdateOne
 from pymongo.database import Database
 from pymongo.errors import (
+    BulkWriteError,
     DuplicateKeyError,
     PyMongoError,
 )
@@ -25,8 +28,14 @@ from mlflow_mongodb.infrastructure.errors import (
 from mlflow_mongodb.infrastructure.repository_operations import repository_operation
 from mlflow_mongodb.infrastructure.retry import retry_on_exception
 from mlflow_mongodb.infrastructure.settings import MongoDBSettings
+from mlflow_mongodb.tracking._compat import (
+    SPANS_LOCATION,
+    SPANS_LOCATION_TAG,
+    TRACE_COST_METADATA,
+)
 from mlflow_mongodb.tracking.types import (
     SpanRecord,
+    SpanSummaryRecord,
     TraceRecord,
 )
 
@@ -172,6 +181,61 @@ class TraceRepository:
             except DuplicateKeyError as exc:
                 raise RepositoryWriteConflictError(trace_id) from exc
 
+    def ensure_traces(self, *, experiment_id: str, request_times: Mapping[str, int]) -> None:
+        """Create missing trace placeholders, retrying concurrent identity conflicts.
+
+        Existing traces retain their metadata. Unordered writes can partially succeed.
+        Retry only failed _id upserts, with at most three bulk-write attempts.
+        """
+        if not request_times:
+            return
+        operations = [
+            UpdateOne(
+                {"_id": trace_id, "experiment_id": experiment_id},
+                {"$setOnInsert": self._trace_placeholder(request_times[trace_id])},
+                upsert=True,
+            )
+            for trace_id in request_times
+        ]
+        for attempt in range(3):
+            with repository_operation("Unable to create trace placeholders."):
+                try:
+                    self._collection.bulk_write(operations, ordered=False)
+                except BulkWriteError as exc:
+                    write_errors = exc.details.get("writeErrors", [])
+                    if (
+                        attempt == 2
+                        or exc.details.get("writeConcernErrors")
+                        or not write_errors
+                        or any(
+                            error.get("code") != 11000 or error.get("keyPattern") != {"_id": 1}
+                            for error in write_errors
+                        )
+                    ):
+                        raise
+                    failed_indexes = [error["index"] for error in write_errors]
+                else:
+                    return
+            # Successful unordered writes must not be replayed; error indexes refer
+            # to the operations submitted in this attempt, not the original batch.
+            operations = [operations[index] for index in failed_indexes]
+
+    @staticmethod
+    def _trace_placeholder(request_time: int) -> dict[str, Any]:
+        return {
+            "request_time": request_time,
+            "state": TraceState.IN_PROGRESS.value,
+            "execution_duration": None,
+            "client_request_id": None,
+            "request_preview": None,
+            "response_preview": None,
+            "trace_info_finalized": False,
+            "authoritative_metadata_keys": [],
+            "run_ids": [],
+            "tags": [{"k": SPANS_LOCATION_TAG, "v": SPANS_LOCATION}],
+            "trace_metadata": [],
+        }
+
     def _upsert_assessments(
         self,
         *,
@@ -204,6 +268,152 @@ class TraceRepository:
             "Unable to persist trace assessments.", errors=(PyMongoError, BSONError, OverflowError)
         ):
             self._assessments_collection.bulk_write(operations, ordered=True)
+
+    def log_spans(self, documents: list[dict[str, Any]]) -> None:
+        """Insert immutable spans; delivery of an existing identity is a no-op."""
+        if not documents:
+            return
+        operations = [
+            UpdateOne(
+                {"trace_id": document["trace_id"], "span_id": document["span_id"]},
+                {"$setOnInsert": document},
+                upsert=True,
+            )
+            for document in documents
+        ]
+        with repository_operation(
+            "Unable to persist spans.", errors=(PyMongoError, BSONError, OverflowError)
+        ):
+            self._spans_collection.bulk_write(operations, ordered=False)
+
+    def span_summary_snapshot(
+        self, *, trace_id: str, experiment_id: str
+    ) -> tuple[int, list[SpanSummaryRecord]]:
+        # Increment AFTER span writes and BEFORE reading them. A later writer
+        # invalidates earlier snapshots and then recomputes from persisted spans.
+        with repository_operation("Unable to read trace span summary snapshot."):
+            trace = self._collection.find_one_and_update(
+                {"_id": trace_id, "experiment_id": experiment_id},
+                {"$inc": {"span_revision": 1}},
+                projection={"span_revision": 1},
+                return_document=ReturnDocument.AFTER,
+            )
+        if trace is None:
+            raise RepositoryNotFoundError(trace_id)
+        with (
+            repository_operation("Unable to read trace span summary snapshot."),
+            self._spans_collection.find(
+                {"trace_id": trace_id},
+                {
+                    "_id": 0,
+                    "span_id": 1,
+                    "parent_span_id": 1,
+                    "status": 1,
+                    "start_time_ns": 1,
+                    "end_time_ns": 1,
+                    "token_usage": 1,
+                    "cost": 1,
+                    "trace_fields": 1,
+                },
+            ).sort([("start_time_ns", ASCENDING), ("span_id", ASCENDING)]) as cursor,
+        ):
+            documents = list(cursor)
+        return trace["span_revision"], [SpanSummaryRecord.from_document(d) for d in documents]
+
+    def update_span_summary(
+        self, *, trace_id: str, experiment_id: str, revision: int, summary: dict[str, Any]
+    ) -> None:
+        fields = {
+            "state": {
+                "$cond": [
+                    {
+                        "$in": [
+                            "$state",
+                            [TraceState.IN_PROGRESS.value, TraceState.STATE_UNSPECIFIED.value],
+                        ]
+                    },
+                    {"$literal": summary["state"]},
+                    "$state",
+                ]
+            },
+            # Existing tags/metadata include start_trace and explicit tag writes.
+            "tags": self._merge_missing_records("$tags", summary["tags"]),
+            "trace_metadata": self._merge_missing_records("$trace_metadata", summary["metadata"]),
+        }
+        for key in ("request_time", "execution_duration"):
+            fields[key] = {
+                "$cond": [
+                    {"$ifNull": ["$trace_info_finalized", False]},
+                    f"${key}",
+                    {"$literal": summary[key]},
+                ]
+            }
+        for key in ("request_preview", "response_preview"):
+            fields[key] = {"$ifNull": [f"${key}", {"$literal": summary[key]}]}
+
+        metadata_updates = []
+        for field, metadata_key in (
+            ("token_usage", TraceMetadataKey.TOKEN_USAGE),
+            ("cost", TRACE_COST_METADATA),
+        ):
+            if summary[field] is not None:
+                is_authoritative = {
+                    "$in": [metadata_key, {"$ifNull": ["$authoritative_metadata_keys", []]}]
+                }
+                fields[field] = {
+                    "$cond": [
+                        is_authoritative,
+                        f"${field}",
+                        {"$literal": summary[field]},
+                    ]
+                }
+                metadata_updates.append(
+                    {
+                        "$set": {
+                            "trace_metadata": {
+                                "$cond": [
+                                    is_authoritative,
+                                    "$trace_metadata",
+                                    build_merge_array_expression(
+                                        "$trace_metadata",
+                                        [
+                                            {
+                                                "k": metadata_key,
+                                                "v": summary["aggregate_metadata"][metadata_key],
+                                            }
+                                        ],
+                                        "k",
+                                    ),
+                                ]
+                            }
+                        }
+                    }
+                )
+
+        with repository_operation("Unable to update trace span summary."):
+            result = self._collection.update_one(
+                {"_id": trace_id, "experiment_id": experiment_id, "span_revision": revision},
+                [{"$set": fields}, *metadata_updates],
+            )
+        if not result.matched_count:
+            raise RepositoryWriteConflictError(trace_id)
+
+    @staticmethod
+    def _merge_missing_records(field: str, values: Mapping[str, str]) -> dict:
+        return {
+            "$concatArrays": [
+                {"$ifNull": [field, []]},
+                {
+                    "$filter": {
+                        "input": {"$literal": [{"k": k, "v": v} for k, v in values.items()]},
+                        "as": "record",
+                        "cond": {
+                            "$not": [{"$in": ["$$record.k", {"$ifNull": [f"{field}.k", []]}]}]
+                        },
+                    }
+                },
+            ]
+        }
 
     def get_trace_info(self, trace_id: str) -> TraceRecord:
         records = self.batch_get_trace_infos([trace_id])
