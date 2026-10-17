@@ -5,7 +5,14 @@ from uuid import UUID
 
 import pytest
 from mlflow.entities import (
+    Dataset,
+    DatasetInput,
+    InputTag,
     LifecycleStage,
+    LoggedModelInput,
+    LoggedModelOutput,
+    Metric,
+    Param,
     RunStatus,
     RunTag,
 )
@@ -13,16 +20,23 @@ from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import (
     INTERNAL_ERROR,
     INVALID_PARAMETER_VALUE,
+    RESOURCE_ALREADY_EXISTS,
     RESOURCE_DOES_NOT_EXIST,
     ErrorCode,
 )
 from mlflow.utils.mlflow_tags import MLFLOW_RUN_NAME
+from mlflow.utils.search_utils import SearchUtils
 
 import mlflow_mongodb.tracking.store as tracking_store
 from mlflow_mongodb.infrastructure.errors import (
+    RepositoryAlreadyExistsError,
+    RepositoryNotActiveError,
+    RepositoryNotFoundError,
+    RepositoryParamConflictError,
     RepositoryPersistenceError,
 )
 from mlflow_mongodb.tracking.store import MongoDBTrackingStore
+from mlflow_mongodb.tracking.types import RunMetricRecord
 
 RUN_ID = UUID(int=42).hex
 TIMESTAMP = 1_700_000_000_000
@@ -180,6 +194,156 @@ def test_update_run_info_converts_status_and_returned_record(
     assert (info.status, info.end_time, info.run_name) == ("FINISHED", TIMESTAMP + 100, "$renamed")
 
 
+def test_batch_encodes_metric_identity_and_key_value_entries(run_store, run_repository):
+    metric = Metric(
+        "loss", 0.4, TIMESTAMP, 2, model_id="m-model", dataset_name="training", dataset_digest="abc"
+    )
+
+    run_store.log_batch(RUN_ID, [metric], [Param("depth", "3")], [RunTag("team", "$risk")])
+
+    run_repository.log_batch.assert_called_once_with(
+        run_id=RUN_ID,
+        metrics=[
+            {
+                "k": "loss",
+                "v": 0.4,
+                "timestamp": TIMESTAMP,
+                "step": 2,
+                "model_id": "m-model",
+                "dataset_name": "training",
+                "dataset_digest": "abc",
+            }
+        ],
+        params=[{"k": "depth", "v": "3"}],
+        tags=[{"k": "team", "v": "$risk"}],
+    )
+
+
+def test_duplicate_param_keys_are_rejected_before_batch_persistence(run_store, run_repository):
+    with pytest.raises(MlflowException) as caught:
+        run_store.log_batch(RUN_ID, [], [Param("depth", "3"), Param("depth", "4")], [])
+
+    assert caught.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
+    run_repository.log_batch.assert_not_called()
+
+
+def test_inputs_outputs_are_encoded_without_losing_dataset_metadata(run_store, run_repository):
+    dataset = Dataset("training", "abc", "test", "{}", "{}", "{}")
+
+    run_store.log_inputs(
+        RUN_ID,
+        [DatasetInput(dataset, [InputTag("context", "training")])],
+        [LoggedModelInput("m-input")],
+    )
+    run_store.log_outputs(RUN_ID, [LoggedModelOutput("m-output", 2)])
+
+    run_repository.log_inputs.assert_called_once_with(
+        run_id=RUN_ID,
+        datasets=[
+            {"dataset": dataset.to_dictionary(), "tags": [{"k": "context", "v": "training"}]}
+        ],
+        models=[{"model_id": "m-input"}],
+    )
+    run_repository.log_outputs.assert_called_once_with(
+        run_id=RUN_ID, models=[{"model_id": "m-output", "step": 2}]
+    )
+
+
+def test_invalid_input_container_remains_a_type_error(run_store, run_repository):
+    with pytest.raises(TypeError, match="should be a list"):
+        run_store.log_inputs(RUN_ID, datasets="invalid")
+
+    run_repository.log_inputs.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "operation", ["log_batch", "log_inputs", "log_outputs", "get_metric_history"]
+)
+def test_invalid_run_id_is_rejected_before_repository_access(run_store, run_repository, operation):
+    args = {
+        "log_batch": ([], [], []),
+        "log_inputs": (),
+        "log_outputs": ([],),
+        "get_metric_history": ("loss",),
+    }[operation]
+
+    with pytest.raises(MlflowException) as caught:
+        getattr(run_store, operation)("invalid id!", *args)
+
+    assert caught.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
+    getattr(run_repository, operation).assert_not_called()
+
+
+@pytest.mark.parametrize("max_results", [0, -1, True, 1.5, "2"])
+def test_invalid_metric_page_size_is_rejected(run_store, run_repository, max_results):
+    with pytest.raises(MlflowException, match="positive integer") as caught:
+        run_store.get_metric_history(RUN_ID, "loss", max_results=max_results)
+
+    assert caught.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
+    run_repository.get_metric_history.assert_not_called()
+
+
+def test_negative_metric_offset_is_rejected(run_store, run_repository):
+    with pytest.raises(MlflowException, match="offset must not be negative") as caught:
+        run_store.get_metric_history(RUN_ID, "loss", page_token=SearchUtils.create_page_token(-1))
+
+    assert caught.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
+    run_repository.get_metric_history.assert_not_called()
+
+
+def test_metric_history_pagination_reads_extra_record_and_preserves_identity(
+    run_store, run_repository
+):
+    run_repository.get_metric_history.return_value = [
+        RunMetricRecord("loss", value, TIMESTAMP + index, index, "m-model", "training", "abc")
+        for index, value in enumerate((0.5, 0.4, 0.3))
+    ]
+
+    page = run_store.get_metric_history(
+        RUN_ID, "loss", max_results=2, page_token=SearchUtils.create_page_token(3)
+    )
+
+    run_repository.get_metric_history.assert_called_once_with(
+        run_id=RUN_ID, metric_key="loss", offset=3, limit=3
+    )
+    assert [metric.value for metric in page] == [0.5, 0.4]
+    assert page.token == SearchUtils.create_page_token(5)
+    assert all(metric.run_id == RUN_ID and metric.dataset_digest == "abc" for metric in page)
+
+
+@pytest.mark.parametrize(
+    ("operation", "repository_method", "expected_message"),
+    [
+        ("create_run", "create", "Unable to create run."),
+        ("get_run", "find_by_id", "Unable to get run."),
+        ("delete_run", "mark_deleted", "Unable to delete run."),
+        ("restore_run", "restore", "Unable to restore run."),
+        ("update_run_info", "update_info", "Unable to update run info."),
+        ("log_batch", "log_batch", "Unable to log run batch."),
+        ("log_inputs", "log_inputs", "Unable to log run inputs."),
+        ("log_outputs", "log_outputs", "Unable to log run outputs."),
+        ("get_metric_history", "get_metric_history", "Unable to read metric history."),
+    ],
+)
+def test_run_operations_sanitize_and_log_persistence_failure_once(
+    run_store, run_repository, caplog, operation, repository_method, expected_message
+):
+    error = RepositoryPersistenceError("Private database URI and query details")
+    getattr(run_repository, repository_method).side_effect = error
+
+    with pytest.raises(MlflowException) as caught:
+        _invoke_store(run_store, operation)
+
+    assert caught.value.message == expected_message
+    assert caught.value.error_code == ErrorCode.Name(INTERNAL_ERROR)
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True
+    records = [record for record in caplog.records if record.name == tracking_store.logger.name]
+    assert len(records) == 1
+    assert records[0].args == (error,)
+    assert records[0].exc_info is None
+
+
 def test_create_run_translates_parent_read_failure(run_store, experiment_repository):
     experiment_repository.find_by_id.side_effect = RepositoryPersistenceError("Private parent read")
 
@@ -188,6 +352,60 @@ def test_create_run_translates_parent_read_failure(run_store, experiment_reposit
 
     assert caught.value.message == "Unable to create run."
     assert caught.value.error_code == ErrorCode.Name(INTERNAL_ERROR)
+
+
+@pytest.mark.parametrize(
+    ("operation", "repository_method", "error", "expected_code"),
+    [
+        ("create_run", "create", RepositoryAlreadyExistsError(RUN_ID), RESOURCE_ALREADY_EXISTS),
+        ("delete_run", "mark_deleted", RepositoryNotFoundError(RUN_ID), RESOURCE_DOES_NOT_EXIST),
+        ("restore_run", "restore", RepositoryNotFoundError(RUN_ID), RESOURCE_DOES_NOT_EXIST),
+        (
+            "update_run_info",
+            "update_info",
+            RepositoryNotFoundError(RUN_ID),
+            RESOURCE_DOES_NOT_EXIST,
+        ),
+        (
+            "log_batch",
+            "log_batch",
+            RepositoryParamConflictError("depth", "3", "4", RUN_ID),
+            INVALID_PARAMETER_VALUE,
+        ),
+        ("log_batch", "log_batch", RepositoryNotFoundError(RUN_ID), RESOURCE_DOES_NOT_EXIST),
+        (
+            "log_batch",
+            "log_batch",
+            RepositoryNotActiveError(RUN_ID, LifecycleStage.DELETED),
+            INVALID_PARAMETER_VALUE,
+        ),
+        ("log_inputs", "log_inputs", RepositoryNotFoundError(RUN_ID), RESOURCE_DOES_NOT_EXIST),
+        ("log_outputs", "log_outputs", RepositoryNotFoundError(RUN_ID), RESOURCE_DOES_NOT_EXIST),
+        (
+            "log_inputs",
+            "log_inputs",
+            RepositoryNotActiveError(RUN_ID, LifecycleStage.DELETED),
+            INVALID_PARAMETER_VALUE,
+        ),
+        (
+            "log_outputs",
+            "log_outputs",
+            RepositoryNotActiveError(RUN_ID, LifecycleStage.DELETED),
+            INVALID_PARAMETER_VALUE,
+        ),
+    ],
+)
+def test_run_domain_errors_keep_codes_and_suppressed_chaining(
+    run_store, run_repository, operation, repository_method, error, expected_code
+):
+    getattr(run_repository, repository_method).side_effect = error
+
+    with pytest.raises(MlflowException) as caught:
+        _invoke_store(run_store, operation)
+
+    assert caught.value.error_code == ErrorCode.Name(expected_code)
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True
 
 
 def test_run_repository_initialization_failure_is_logged_once(monkeypatch, caplog):
@@ -248,3 +466,21 @@ def test_programming_errors_pass_through_the_store_decorator(run_store, run_repo
         run_store.get_run(RUN_ID)
 
     assert caught.value is failure
+
+
+@pytest.mark.parametrize("operation", ["log_metric", "log_param", "set_tag"])
+def test_inherited_single_value_logging_delegates_to_batch(run_store, run_repository, operation):
+    entity = {
+        "log_metric": Metric("loss", 0.4, TIMESTAMP, 1),
+        "log_param": Param("depth", "3"),
+        "set_tag": RunTag("team", "risk"),
+    }[operation]
+
+    getattr(run_store, operation)(RUN_ID, entity)
+
+    run_repository.log_batch.assert_called_once()
+    args = run_repository.log_batch.call_args.kwargs
+    assert args["run_id"] == RUN_ID
+    assert len(args["metrics"]) == (1 if operation == "log_metric" else 0)
+    assert len(args["params"]) == (1 if operation == "log_param" else 0)
+    assert len(args["tags"]) == (1 if operation == "set_tag" else 0)

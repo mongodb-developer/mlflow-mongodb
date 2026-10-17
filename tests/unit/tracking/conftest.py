@@ -111,4 +111,5 @@ def run_store(
     experiment_repository.find_by_id.return_value = experiment_record_factory()
     for method in ("create", "find_by_id", "update_info", "mark_deleted", "restore"):
         getattr(run_repository, method).return_value = run_record_factory()
+    run_repository.get_metric_history.return_value = []
     return store

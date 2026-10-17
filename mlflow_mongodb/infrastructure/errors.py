@@ -59,5 +59,9 @@ class RepositoryInvalidRegexError(Exception):
     """Raised when a filter contains an invalid regular expression."""
 
 
+class RepositoryParamConflictError(Exception):
+    """Raised when an operation attempts to change an existing parameter value."""
+
+
 class RepositoryTagNotFoundError(Exception):
     """Raised when a requested tag is missing from an existing resource."""

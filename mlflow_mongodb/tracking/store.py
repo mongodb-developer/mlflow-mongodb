@@ -47,10 +47,16 @@ from mlflow.utils.search_utils import (
 from mlflow.utils.time import get_current_time_millis
 from mlflow.utils.uri import append_to_uri_path, resolve_uri_if_local
 from mlflow.utils.validation import (
+    _validate_batch_log_data,
+    _validate_batch_log_limits,
+    _validate_dataset_inputs,
     _validate_experiment_artifact_location,
     _validate_experiment_artifact_location_length,
     _validate_experiment_name,
     _validate_experiment_tag,
+    _validate_metric_name,
+    _validate_param_keys_unique,
+    _validate_run_id,
 )
 from pymongo import MongoClient
 from pymongo.database import Database
@@ -61,6 +67,7 @@ from mlflow_mongodb.infrastructure.errors import (
     RepositoryInvalidAttributeError,
     RepositoryNotActiveError,
     RepositoryNotFoundError,
+    RepositoryParamConflictError,
     RepositoryTagNotFoundError,
     RepositoryUnsupportedComparatorError,
     RepositoryUnsupportedFieldTypeError,
@@ -629,4 +636,161 @@ class MongoDBTrackingStore(AbstractStore):
             lifecycle_stage=updated.lifecycle_stage,
             artifact_uri=updated.artifact_uri,
             run_name=updated.name,
+        )
+
+    @handle_persistence_error("Unable to log run batch.", logger=logger)
+    def log_batch(
+        self, run_id: str, metrics: list[Metric], params: list[Param], tags: list[RunTag]
+    ) -> None:
+        _validate_run_id(run_id)
+        metrics, params, tags = _validate_batch_log_data(metrics, params, tags)
+        _validate_batch_log_limits(metrics, params, tags)
+        _validate_param_keys_unique(params)
+
+        try:
+            self._run_repository.log_batch(
+                run_id=run_id,
+                metrics=[
+                    {
+                        "k": metric.key,
+                        "v": metric.value,
+                        "timestamp": metric.timestamp,
+                        "step": metric.step,
+                        "model_id": metric.model_id,
+                        "dataset_name": metric.dataset_name,
+                        "dataset_digest": metric.dataset_digest,
+                    }
+                    for metric in metrics
+                ],
+                params=[{"k": param.key, "v": param.value} for param in params],
+                tags=[{"k": tag.key, "v": tag.value} for tag in tags],
+            )
+        except RepositoryParamConflictError as exc:
+            logger.error("Unable to log run batch: %s", exc)
+            key, old_value, new_value, conflicting_run_id = exc.args
+            raise MlflowException(
+                f"Changing param values is not allowed. Param with key='{key}' was already logged "
+                f"with value='{old_value}' for run ID='{conflicting_run_id}'. Attempted logging "
+                f"new value '{new_value}'.",
+                INVALID_PARAMETER_VALUE,
+            ) from None
+        except RepositoryNotActiveError as exc:
+            logger.error("Unable to log run batch: %s", exc)
+            _, lifecycle_stage = exc.args
+            raise MlflowException(
+                f"The run {run_id} must be in the 'active' state. "
+                f"Current state is {lifecycle_stage}.",
+                INVALID_PARAMETER_VALUE,
+            ) from None
+        except RepositoryNotFoundError as exc:
+            logger.error("Unable to log run batch: %s", exc)
+            raise MlflowException(
+                f"Run with id={run_id} not found", RESOURCE_DOES_NOT_EXIST
+            ) from None
+
+    @handle_persistence_error("Unable to log run inputs.", logger=logger)
+    def log_inputs(
+        self,
+        run_id: str,
+        datasets: list[DatasetInput] | None = None,
+        models: list[LoggedModelInput] | None = None,
+    ) -> None:
+        _validate_run_id(run_id)
+        if datasets is not None:
+            if not isinstance(datasets, list):
+                raise TypeError(f"Argument 'datasets' should be a list, got '{type(datasets)}'")
+            _validate_dataset_inputs(datasets)
+
+        dataset_inputs = [
+            {
+                "dataset": dataset_input.dataset.to_dictionary(),
+                "tags": [{"k": tag.key, "v": tag.value} for tag in dataset_input.tags],
+            }
+            for dataset_input in datasets or []
+        ]
+        model_inputs = [{"model_id": model.model_id} for model in models or []]
+        try:
+            self._run_repository.log_inputs(
+                run_id=run_id, datasets=dataset_inputs, models=model_inputs
+            )
+        except RepositoryNotFoundError as exc:
+            logger.error("Unable to log run inputs: %s", exc)
+            raise MlflowException(
+                f"Run with id={run_id} not found", RESOURCE_DOES_NOT_EXIST
+            ) from None
+        except RepositoryNotActiveError as exc:
+            logger.error("Unable to log run inputs: %s", exc)
+            _, lifecycle_stage = exc.args
+            raise MlflowException(
+                f"The run {run_id} must be in the 'active' state. "
+                f"Current state is {lifecycle_stage}.",
+                INVALID_PARAMETER_VALUE,
+            ) from None
+
+    @handle_persistence_error("Unable to log run outputs.", logger=logger)
+    def log_outputs(self, run_id: str, models: list[LoggedModelOutput]) -> None:
+        _validate_run_id(run_id)
+        model_outputs = [{"model_id": model.model_id, "step": model.step} for model in models]
+        try:
+            self._run_repository.log_outputs(run_id=run_id, models=model_outputs)
+        except RepositoryNotFoundError as exc:
+            logger.error("Unable to log run outputs: %s", exc)
+            raise MlflowException(
+                f"Run with id={run_id} not found", RESOURCE_DOES_NOT_EXIST
+            ) from None
+        except RepositoryNotActiveError as exc:
+            logger.error("Unable to log run outputs: %s", exc)
+            _, lifecycle_stage = exc.args
+            raise MlflowException(
+                f"The run {run_id} must be in the 'active' state. "
+                f"Current state is {lifecycle_stage}.",
+                INVALID_PARAMETER_VALUE,
+            ) from None
+
+    @handle_persistence_error("Unable to read metric history.", logger=logger)
+    def get_metric_history(
+        self,
+        run_id: str,
+        metric_key: str,
+        max_results: int | None = None,
+        page_token: str | None = None,
+    ) -> PagedList[Metric]:
+        _validate_run_id(run_id)
+        _validate_metric_name(metric_key)
+        if max_results is not None and (
+            isinstance(max_results, bool) or not isinstance(max_results, int) or max_results <= 0
+        ):
+            raise MlflowException(
+                "max_results must be a positive integer.", INVALID_PARAMETER_VALUE
+            )
+        offset = SearchUtils.parse_start_offset_from_page_token(page_token)
+        if offset < 0:
+            raise MlflowException("Page offset must not be negative.", INVALID_PARAMETER_VALUE)
+
+        metrics = self._run_repository.get_metric_history(
+            run_id=run_id,
+            metric_key=metric_key,
+            offset=offset,
+            limit=max_results + 1 if max_results is not None else None,
+        )
+
+        next_token = None
+        if max_results is not None and len(metrics) > max_results:
+            metrics = metrics[:max_results]
+            next_token = SearchUtils.create_page_token(offset + max_results)
+        return PagedList(
+            [
+                Metric(
+                    key=metric.key,
+                    value=metric.value,
+                    timestamp=metric.timestamp,
+                    step=metric.step,
+                    model_id=metric.model_id,
+                    dataset_name=metric.dataset_name,
+                    dataset_digest=metric.dataset_digest,
+                    run_id=run_id,
+                )
+                for metric in metrics
+            ],
+            next_token,
         )

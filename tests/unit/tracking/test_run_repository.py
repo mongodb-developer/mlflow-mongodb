@@ -11,7 +11,9 @@ from pymongo.errors import DuplicateKeyError, OperationFailure
 import mlflow_mongodb.tracking.repositories.runs as run_module
 from mlflow_mongodb.infrastructure.errors import (
     RepositoryAlreadyExistsError,
+    RepositoryNotActiveError,
     RepositoryNotFoundError,
+    RepositoryParamConflictError,
     RepositoryPersistenceError,
 )
 from mlflow_mongodb.infrastructure.settings import MongoDBSettings
@@ -184,6 +186,55 @@ def test_record_conversion_is_outside_persistence_translation(
     collections["runs"].find_one.assert_called_once_with({"_id": RUN_ID})
 
 
+@pytest.mark.parametrize("error_type", [OperationFailure, InvalidBSON])
+def test_metric_history_translates_failure_after_partial_cursor_iteration(
+    repository, collections, monkeypatch, error_type
+):
+    backend_error = error_type("Private cursor details")
+    convert = Mock()
+    monkeypatch.setattr(run_module.RunMetricRecord, "from_document", convert)
+
+    def iterate():
+        yield {"k": "loss", "v": 0.4, "timestamp": 1000, "step": 1}
+        raise backend_error
+
+    cursor = MagicMock()
+    cursor.sort.return_value = cursor
+    cursor.skip.return_value = cursor
+    cursor.limit.return_value = cursor
+    cursor.__iter__.side_effect = iterate
+    collections["run_metrics"].find.return_value = cursor
+
+    with pytest.raises(RepositoryPersistenceError) as caught:
+        repository.get_metric_history(run_id=RUN_ID, metric_key="loss", offset=2, limit=3)
+
+    assert caught.value.__cause__ is backend_error
+    convert.assert_not_called()
+    cursor.sort.assert_called_once_with(
+        [("timestamp", ASCENDING), ("step", ASCENDING), ("v", ASCENDING), ("_id", ASCENDING)]
+    )
+    cursor.skip.assert_called_once_with(2)
+    cursor.limit.assert_called_once_with(3)
+
+
+def test_metric_history_converts_materialized_documents(repository, collections):
+    cursor = MagicMock()
+    cursor.sort.return_value = cursor
+    cursor.skip.return_value = cursor
+    cursor.__iter__.return_value = iter(
+        [{"k": "loss", "v": 0.4, "timestamp": 1000, "step": 1, "run_id": RUN_ID}]
+    )
+    collections["run_metrics"].find.return_value = cursor
+
+    records = repository.get_metric_history(run_id=RUN_ID, metric_key="loss")
+
+    assert [(record.key, record.value, record.run_id) for record in records] == [
+        ("loss", 0.4, RUN_ID)
+    ]
+    collections["run_metrics"].find.assert_called_once_with({"run_id": RUN_ID, "k": "loss"})
+    cursor.limit.assert_not_called()
+
+
 @pytest.mark.parametrize("method", ["mark_deleted", "restore"])
 def test_lifecycle_updates_match_run_id_without_a_stage_precondition(
     repository, collections, run_document_factory, method
@@ -261,4 +312,141 @@ def test_update_info_translates_database_failure(repository, collections, error_
         repository.update_info(run_id=RUN_ID, status="FINISHED", end_time=2000, run_name=None)
 
     assert str(caught.value) == "Unable to update run info."
+    assert caught.value.__cause__ is backend_error
+
+
+@pytest.mark.parametrize("stage", ["read", "metrics", "update"])
+def test_batch_boundaries_translate_failures_and_preserve_write_order(
+    repository, collections, stage
+):
+    backend_error = OperationFailure("Private batch details")
+    runs = collections["runs"]
+    metrics = collections["run_metrics"]
+    method = {"read": runs.find_one, "metrics": metrics.insert_many, "update": runs.update_one}[
+        stage
+    ]
+    method.side_effect = backend_error
+
+    with pytest.raises(RepositoryPersistenceError) as caught:
+        repository.log_batch(
+            run_id=RUN_ID,
+            metrics=[{"k": "loss", "v": 0.4, "timestamp": 1000, "step": 1}],
+            params=[],
+            tags=[{"k": "team", "v": "risk"}],
+        )
+
+    assert caught.value.__cause__ is backend_error
+    if stage == "read":
+        metrics.insert_many.assert_not_called()
+    else:
+        metrics.insert_many.assert_called_once()
+    if stage != "update":
+        runs.update_one.assert_not_called()
+
+
+def test_parameter_conflict_precedes_metric_insertion(repository, collections):
+    collections["runs"].find_one.return_value = {
+        "lifecycle_stage": LifecycleStage.ACTIVE,
+        "params": [{"k": "depth", "v": "3"}],
+    }
+
+    with pytest.raises(RepositoryParamConflictError) as caught:
+        repository.log_batch(
+            run_id=RUN_ID,
+            metrics=[{"k": "loss", "v": 0.4, "timestamp": 1000, "step": 1}],
+            params=[{"k": "depth", "v": "4"}],
+            tags=[],
+        )
+
+    assert caught.value.args == ("depth", "3", "4", RUN_ID)
+    collections["run_metrics"].insert_many.assert_not_called()
+    collections["runs"].update_one.assert_not_called()
+
+
+def test_empty_batch_checks_run_without_writing(repository, collections):
+    repository.log_batch(run_id=RUN_ID, metrics=[], params=[], tags=[])
+
+    collections["runs"].find_one.assert_called_once()
+    collections["run_metrics"].insert_many.assert_not_called()
+    collections["runs"].update_one.assert_not_called()
+
+
+@pytest.mark.parametrize("nonempty", [False, True])
+def test_batch_with_deleted_run_does_not_write(repository, collections, nonempty):
+    collections["runs"].find_one.return_value = {
+        "lifecycle_stage": LifecycleStage.DELETED,
+        "params": [{"k": "depth", "v": "3"}],
+    }
+
+    with pytest.raises(RepositoryNotActiveError) as caught:
+        repository.log_batch(
+            run_id=RUN_ID,
+            metrics=[{"k": "loss", "v": 0.4, "timestamp": 1000, "step": 1}] if nonempty else [],
+            params=[{"k": "depth", "v": "4"}] if nonempty else [],
+            tags=[{"k": "team", "v": "risk"}] if nonempty else [],
+        )
+
+    assert caught.value.args == (RUN_ID, LifecycleStage.DELETED)
+    collections["run_metrics"].insert_many.assert_not_called()
+    collections["runs"].update_one.assert_not_called()
+
+
+def test_batch_with_missing_run_does_not_write(repository, collections):
+    collections["runs"].find_one.return_value = None
+
+    with pytest.raises(RepositoryNotFoundError):
+        repository.log_batch(run_id=RUN_ID, metrics=[], params=[], tags=[])
+
+    collections["run_metrics"].insert_many.assert_not_called()
+    collections["runs"].update_one.assert_not_called()
+
+
+def test_batch_reports_run_disappearing_after_metric_insertion(repository, collections):
+    collections["runs"].update_one.return_value.matched_count = 0
+
+    with pytest.raises(RepositoryNotFoundError) as caught:
+        repository.log_batch(
+            run_id=RUN_ID,
+            metrics=[{"k": "loss", "v": 0.4, "timestamp": 1000, "step": 1}],
+            params=[],
+            tags=[],
+        )
+
+    assert caught.value.args == (RUN_ID,)
+    collections["run_metrics"].insert_many.assert_called_once()
+    collections["runs"].update_one.assert_called_once()
+
+
+@pytest.mark.parametrize("method", ["log_inputs", "log_outputs"])
+@pytest.mark.parametrize("previous", [None, {"lifecycle_stage": LifecycleStage.DELETED}])
+def test_input_output_operations_distinguish_missing_and_inactive_runs(
+    repository, collections, method, previous
+):
+    collections["runs"].find_one_and_update.return_value = previous
+    kwargs = {"run_id": RUN_ID, "models": []}
+    if method == "log_inputs":
+        kwargs["datasets"] = []
+    expected_type = RepositoryNotFoundError if previous is None else RepositoryNotActiveError
+
+    with pytest.raises(expected_type) as caught:
+        getattr(repository, method)(**kwargs)
+
+    expected_args = (RUN_ID,) if previous is None else (RUN_ID, LifecycleStage.DELETED)
+    assert caught.value.args == expected_args
+    args, kwargs = collections["runs"].find_one_and_update.call_args
+    assert args[0] == {"_id": RUN_ID}
+    assert kwargs["return_document"] == ReturnDocument.BEFORE
+
+
+@pytest.mark.parametrize("method", ["log_inputs", "log_outputs"])
+def test_input_output_backend_failures_are_translated(repository, collections, method):
+    backend_error = InvalidDocument("Private pipeline encoding details")
+    collections["runs"].find_one_and_update.side_effect = backend_error
+    kwargs = {"run_id": RUN_ID, "models": []}
+    if method == "log_inputs":
+        kwargs["datasets"] = []
+
+    with pytest.raises(RepositoryPersistenceError) as caught:
+        getattr(repository, method)(**kwargs)
+
     assert caught.value.__cause__ is backend_error
