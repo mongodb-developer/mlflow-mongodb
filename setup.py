@@ -18,7 +18,7 @@ setup(
         # Temporary workaround for https://github.com/mlflow/mlflow/pull/25559.
         # Remove once the upstream WSGI code is fixed or MLflow lifts the version block.
         "anyio>=3.6.2,!=4.15.0,<5",
-        "mlflow>=3.1.0",
+        "mlflow>=3.5.0,<4",
         "pymongo[srv]>=4.0.0,<5",
     ],
     extras_require={

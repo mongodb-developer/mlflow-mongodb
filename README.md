@@ -11,7 +11,8 @@ store.
 
 ## Installation
 
-Python 3.10 or newer, MLflow 3.1 or newer, and a MongoDB deployment are required.
+Python 3.10 or newer, MLflow 3.5 or newer within the 3.x series, and a MongoDB deployment
+are required.
 
 ```bash
 python -m pip install "mlflow-mongodb>=0.1.0.dev0"
