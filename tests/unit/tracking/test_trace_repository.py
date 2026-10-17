@@ -1,0 +1,263 @@
+"""Trace write contracts, conflicts, and partial cursor failures."""
+
+from unittest.mock import MagicMock, Mock, call
+
+import pytest
+from bson.errors import InvalidDocument
+from pymongo import ReturnDocument
+from pymongo.errors import DuplicateKeyError, OperationFailure
+
+from mlflow_mongodb.infrastructure.errors import (
+    RepositoryPersistenceError,
+    RepositoryWriteConflictError,
+)
+from mlflow_mongodb.infrastructure.settings import MongoDBSettings
+from mlflow_mongodb.tracking.repositories import TraceRepository
+
+TRACE_ID = "tr-example"
+
+
+@pytest.fixture
+def collections():
+    return {name: MagicMock() for name in ("traces", "spans", "assessments")}
+
+
+@pytest.fixture
+def repository(collections):
+    database = MagicMock()
+    database.__getitem__.side_effect = collections.__getitem__
+    return TraceRepository(database)
+
+
+@pytest.fixture
+def failing_cursor():
+    cursor = MagicMock()
+    cursor.__enter__.return_value = cursor
+    cursor.sort.return_value = cursor
+    cursor.limit.return_value = cursor
+    error = OperationFailure("Private cursor details")
+
+    def iterate():
+        yield {"_id": TRACE_ID}
+        raise error
+
+    cursor.__iter__.side_effect = iterate
+    return cursor, error
+
+
+@pytest.fixture
+def start_trace_arguments():
+    return {
+        "trace_id": TRACE_ID,
+        "experiment_id": "42",
+        "request_time": 123,
+        "state": "OK",
+        "execution_duration": 10,
+        "client_request_id": "$client",
+        "request_preview": None,
+        "response_preview": None,
+        "tags": {"team.name": "$risk"},
+        "trace_metadata": {"source": "$run"},
+        "assessments": [{"assessment_id": "a-one", "feedback": {"value": True}}],
+    }
+
+
+@pytest.fixture
+def start_trace_dependencies(repository, monkeypatch, trace_record_factory):
+    dependencies = Mock()
+    dependencies.get_trace_info.return_value = trace_record_factory(_id=TRACE_ID)
+    monkeypatch.setattr(repository, "_upsert_trace", dependencies.upsert_trace)
+    monkeypatch.setattr(repository, "_upsert_assessments", dependencies.upsert_assessments)
+    monkeypatch.setattr(repository, "get_trace_info", dependencies.get_trace_info)
+    return dependencies
+
+
+@pytest.mark.parametrize(
+    "stage,expected_calls",
+    [
+        ("upsert_trace", ["upsert_trace"]),
+        ("upsert_assessments", ["upsert_trace", "upsert_assessments"]),
+        ("get_trace_info", ["upsert_trace", "upsert_assessments", "get_trace_info"]),
+    ],
+)
+def test_start_trace_propagates_failure_and_stops_before_subsequent_operations(
+    repository, start_trace_arguments, start_trace_dependencies, stage, expected_calls
+):
+    error = RepositoryPersistenceError("Private database details")
+    getattr(start_trace_dependencies, stage).side_effect = error
+
+    with pytest.raises(RepositoryPersistenceError) as caught:
+        repository.start_trace(**start_trace_arguments)
+
+    assert caught.value is error
+    assert [entry[0] for entry in start_trace_dependencies.mock_calls] == expected_calls
+
+
+def test_initialization_uses_configured_collections_and_unique_child_identities():
+    collections = {
+        name: MagicMock() for name in ("custom_traces", "custom_spans", "custom_assessments")
+    }
+    database = MagicMock()
+    database.__getitem__.side_effect = collections.__getitem__
+    settings = MongoDBSettings(
+        traces_collection_name="custom_traces",
+        spans_collection_name="custom_spans",
+        assessments_collection_name="custom_assessments",
+    )
+
+    repository = TraceRepository(database, settings=settings)
+
+    assert repository._settings is settings
+    assert database.__getitem__.call_args_list == [call(name) for name in collections]
+    collections["custom_spans"].create_index.assert_any_call(
+        [("trace_id", 1), ("span_id", 1)], unique=True, name="spans_trace_span_unique"
+    )
+    collections["custom_assessments"].create_index.assert_any_call(
+        [("trace_id", 1), ("assessment_id", 1)],
+        unique=True,
+        name="assessments_trace_assessment_unique",
+    )
+
+
+@pytest.mark.parametrize("collection_name", ["traces", "spans", "assessments"])
+def test_index_initialization_failures_preserve_backend_cause(collections, collection_name):
+    error = OperationFailure("Private index details")
+    collections[collection_name].create_index.side_effect = error
+    database = MagicMock()
+    database.__getitem__.side_effect = collections.__getitem__
+    with pytest.raises(RepositoryPersistenceError) as caught:
+        TraceRepository(database)
+    assert str(caught.value) == "Unable to initialize trace repository."
+    assert caught.value.__cause__ is error
+
+
+def test_trace_upsert_retries_duplicate_key_with_ownership_filter(repository, collections):
+    collection = collections["traces"]
+    collection.find_one_and_update.side_effect = [DuplicateKeyError("race"), {"_id": TRACE_ID}]
+    update = [{"$set": {"state": {"$literal": "OK"}}}]
+
+    assert repository._upsert_trace(TRACE_ID, "42", update) == {"_id": TRACE_ID}
+    assert (
+        collection.find_one_and_update.call_args_list
+        == [
+            call(
+                {"_id": TRACE_ID, "experiment_id": "42"},
+                update,
+                upsert=True,
+                return_document=ReturnDocument.AFTER,
+            )
+        ]
+        * 2
+    )
+    collection.find_one.assert_not_called()
+
+
+def test_trace_upsert_stops_after_three_identity_conflicts(repository, collections):
+    error = DuplicateKeyError("Private identity details")
+    collections["traces"].find_one_and_update.side_effect = error
+    with pytest.raises(RepositoryPersistenceError) as caught:
+        repository._upsert_trace(TRACE_ID, "42", {"$set": {"state": "OK"}})
+    assert collections["traces"].find_one_and_update.call_count == 3
+    assert isinstance(caught.value.__cause__, RepositoryWriteConflictError)
+    assert caught.value.__cause__.__cause__ is error
+
+
+@pytest.mark.parametrize("error_type", [OperationFailure, InvalidDocument])
+def test_trace_upsert_does_not_retry_other_database_errors(repository, collections, error_type):
+    error = error_type("Private write details")
+    collections["traces"].find_one_and_update.side_effect = error
+    with pytest.raises(RepositoryPersistenceError) as caught:
+        repository._upsert_trace(TRACE_ID, "42", {})
+    assert caught.value.__cause__ is error
+    assert collections["traces"].find_one_and_update.call_count == 1
+
+
+def test_empty_trace_run_links_skip_database_update(repository, collections):
+    assert repository.link_traces_to_run(trace_ids=[], run_id="run") is None
+    collections["traces"].update_many.assert_not_called()
+
+
+def test_empty_prompt_links_skip_database_update(repository, collections):
+    assert repository.link_prompts(trace_id=TRACE_ID, prompt_versions=[]) is None
+    collections["traces"].find_one_and_update.assert_not_called()
+
+
+def test_partial_batch_read_failure_closes_cursor_and_preserves_cause(
+    repository, collections, failing_cursor
+):
+    cursor, error = failing_cursor
+    collections["traces"].aggregate.return_value = cursor
+    with pytest.raises(RepositoryPersistenceError) as caught:
+        repository.batch_get_traces([TRACE_ID])
+    assert caught.value.__cause__ is error
+    assert cursor.__exit__.call_count == 1
+
+
+def test_partial_metadata_read_failure_closes_cursor_and_preserves_cause(
+    repository, collections, failing_cursor
+):
+    cursor, error = failing_cursor
+    collections["traces"].aggregate.return_value = cursor
+    with pytest.raises(RepositoryPersistenceError) as caught:
+        repository.batch_get_trace_infos([TRACE_ID])
+    assert caught.value.__cause__ is error
+    assert cursor.__exit__.call_count == 1
+
+
+def test_partial_span_read_failure_closes_cursor_and_preserves_cause(
+    repository, collections, failing_cursor
+):
+    cursor, error = failing_cursor
+    collections["spans"].find.return_value = cursor
+    with pytest.raises(RepositoryPersistenceError) as caught:
+        repository.get_spans(TRACE_ID)
+    assert caught.value.__cause__ is error
+    assert cursor.__exit__.call_count == 1
+
+
+def test_partial_deletion_selection_failure_closes_cursor_before_any_deletes(
+    repository, collections, failing_cursor
+):
+    cursor, error = failing_cursor
+    collections["traces"].find.return_value = cursor
+    with pytest.raises(RepositoryPersistenceError) as caught:
+        repository.delete_traces(experiment_id="42", max_timestamp_millis=123)
+    assert caught.value.__cause__ is error
+    assert cursor.__exit__.call_count == 1
+    for collection in collections.values():
+        collection.delete_many.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "failing_collection,expected_calls",
+    [("spans", (1, 0, 0)), ("assessments", (1, 1, 0)), ("traces", (1, 1, 1))],
+)
+def test_deletion_failure_stops_cascade_without_deleting_metadata_early(
+    repository, collections, failing_collection, expected_calls
+):
+    cursor = MagicMock()
+    cursor.__enter__.return_value = cursor
+    cursor.sort.return_value = cursor
+    cursor.__iter__.return_value = iter([{"_id": TRACE_ID}])
+    collections["traces"].find.return_value = cursor
+    error = OperationFailure("Private delete details")
+    collections[failing_collection].delete_many.side_effect = error
+
+    with pytest.raises(RepositoryPersistenceError) as caught:
+        repository.delete_traces(experiment_id="42", trace_ids=[TRACE_ID])
+
+    assert caught.value.__cause__ is error
+    assert (
+        tuple(
+            collections[name].delete_many.call_count for name in ("spans", "assessments", "traces")
+        )
+        == expected_calls
+    )
+
+
+def test_empty_assessments_skip_bulk_write(repository, collections):
+    assert (
+        repository._upsert_assessments(trace_id=TRACE_ID, experiment_id="42", assessments=[])
+        is None
+    )
+    collections["assessments"].bulk_write.assert_not_called()

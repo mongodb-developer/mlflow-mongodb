@@ -17,6 +17,9 @@ def test_empty_environment_uses_default_collection_names():
     [
         ("MLFLOW_MONGODB_REGISTERED_MODELS_COLLECTION", "registered_models_collection_name"),
         ("MLFLOW_MONGODB_MODEL_VERSIONS_COLLECTION", "model_versions_collection_name"),
+        ("MLFLOW_MONGODB_TRACES_COLLECTION", "traces_collection_name"),
+        ("MLFLOW_MONGODB_SPANS_COLLECTION", "spans_collection_name"),
+        ("MLFLOW_MONGODB_ASSESSMENTS_COLLECTION", "assessments_collection_name"),
     ],
 )
 def test_environment_override_preserves_other_default(variable, field):
@@ -52,6 +55,9 @@ def test_explicit_environment_ignores_process_environment(monkeypatch):
     [
         "registered_models_collection_name",
         "model_versions_collection_name",
+        "traces_collection_name",
+        "spans_collection_name",
+        "assessments_collection_name",
     ],
 )
 def test_mongodb_settings_reject_invalid_collection_names(setting_field, invalid_name):
