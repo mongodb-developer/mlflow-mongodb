@@ -21,6 +21,7 @@ def _clear_application_collections(store: MongoDBTrackingStore) -> None:
     store._database[store._settings.experiment_id_counters_collection_name].delete_many({})
     store._database[store._settings.runs_collection_name].delete_many({})
     store._database[store._settings.run_metrics_collection_name].delete_many({})
+    store._database[store._settings.logged_models_collection_name].delete_many({})
 
 
 @pytest.fixture(scope="session")
@@ -63,6 +64,7 @@ def mongodb_store(mongodb_uri: str) -> Iterator[MongoDBTrackingStore]:
     # future test transaction, then preserve the indexes between tests.
     store._experiment_repository
     store._run_repository
+    store._logged_model_repository
 
     try:
         yield store

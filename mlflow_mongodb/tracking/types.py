@@ -161,3 +161,58 @@ class RunRecord:
             ),
             tags=tuple(ExperimentTagRecord(tag["k"], tag["v"]) for tag in document.get("tags", [])),
         )
+
+
+@dataclass(frozen=True)
+class LoggedModelTagRecord:
+    """Stored logged-model tag data."""
+
+    key: str
+    value: str
+
+
+@dataclass(frozen=True)
+class LoggedModelParameterRecord:
+    """Stored logged-model parameter data."""
+
+    key: str
+    value: str
+
+
+@dataclass(frozen=True)
+class LoggedModelRecord:
+    """Typed representation of a logged-model document."""
+
+    model_id: str
+    experiment_id: str
+    name: str
+    artifact_location: str
+    creation_timestamp: int
+    last_updated_timestamp: int
+    status: str
+    status_message: str | None
+    lifecycle_stage: str
+    source_run_id: str | None
+    model_type: str | None
+    tags: tuple[LoggedModelTagRecord, ...]
+    params: tuple[LoggedModelParameterRecord, ...]
+
+    @classmethod
+    def from_document(cls, document: Mapping[str, Any]) -> "LoggedModelRecord":
+        return cls(
+            model_id=document["_id"],
+            experiment_id=document["experiment_id"],
+            name=document["name"],
+            artifact_location=document["artifact_location"],
+            creation_timestamp=document["creation_timestamp"],
+            last_updated_timestamp=document["last_updated_timestamp"],
+            status=document["status"],
+            status_message=document["status_message"],
+            lifecycle_stage=document["lifecycle_stage"],
+            source_run_id=document["source_run_id"],
+            model_type=document["model_type"],
+            tags=tuple(LoggedModelTagRecord(tag["k"], tag["v"]) for tag in document["tags"]),
+            params=tuple(
+                LoggedModelParameterRecord(param["k"], param["v"]) for param in document["params"]
+            ),
+        )
