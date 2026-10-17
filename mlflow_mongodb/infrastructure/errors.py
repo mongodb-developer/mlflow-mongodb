@@ -63,5 +63,16 @@ class RepositoryInvalidRegexError(Exception):
     """Raised when a filter contains an invalid regular expression."""
 
 
+class RepositoryParamConflictError(Exception):
+    """Raised when an operation attempts to change an existing parameter value."""
+
+    def __init__(self, key: str, old_value: str, new_value: str, resource_id: str):
+        super().__init__(key, old_value, new_value, resource_id)
+        self.key = key
+        self.old_value = old_value
+        self.new_value = new_value
+        self.resource_id = resource_id
+
+
 class RepositoryTagNotFoundError(Exception):
     """Raised when a requested tag is missing from an existing resource."""
