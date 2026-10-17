@@ -1,10 +1,11 @@
 """Persistence operations for runs."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 
 from mlflow.entities import LifecycleStage
-from mlflow.utils.mlflow_tags import MLFLOW_RUN_NAME
-from pymongo import ASCENDING, ReturnDocument
+from mlflow.utils.mlflow_tags import MLFLOW_DATASET_CONTEXT, MLFLOW_RUN_NAME
+from pymongo import ASCENDING, DESCENDING, ReturnDocument
 from pymongo.database import Database
 from pymongo.errors import DuplicateKeyError
 
@@ -16,8 +17,28 @@ from mlflow_mongodb.infrastructure.errors import (
     RepositoryParamConflictError,
 )
 from mlflow_mongodb.infrastructure.repository_operations import repository_operation
+from mlflow_mongodb.infrastructure.search_filters import build_value_condition
 from mlflow_mongodb.infrastructure.settings import MongoDBSettings
 from mlflow_mongodb.tracking.types import RunMetricRecord, RunRecord
+
+
+@dataclass(frozen=True)
+class RunFilter:
+    """A validated run search comparison."""
+
+    field_type: str
+    key: str
+    comparator: str
+    value: str | float | tuple[str, ...] | None
+
+
+@dataclass(frozen=True)
+class RunOrder:
+    """Ordering by a run attribute or an embedded key/value entry."""
+
+    field_type: str
+    key: str
+    ascending: bool
 
 
 class RunRepository:
@@ -37,6 +58,168 @@ class RunRepository:
                 [("run_id", ASCENDING), ("k", ASCENDING), ("timestamp", ASCENDING)],
                 name="run_metrics_run_k_timestamp",
             )
+
+    def search(
+        self,
+        *,
+        experiment_ids: Sequence[str],
+        lifecycle_stages: Sequence[str],
+        filters: Sequence[RunFilter],
+        order_by: Sequence[RunOrder],
+        offset: int,
+        limit: int | None,
+    ) -> list[RunRecord]:
+        """Filter, sort, and paginate run documents in MongoDB."""
+        clauses = [
+            {"experiment_id": {"$in": list(experiment_ids)}},
+            {"lifecycle_stage": {"$in": list(lifecycle_stages)}},
+        ]
+        clauses.extend(self._search_condition(clause) for clause in filters)
+        pipeline = [{"$match": {"$and": clauses}}]
+        values = {}
+        ranks = {}
+        sort = {}
+        for index, order in enumerate(order_by):
+            field = f"_search_value_{index}"
+            rank = f"_search_rank_{index}"
+            values[field] = self._search_order_value(order)
+            reference = f"${field}"
+            missing = {"$eq": [reference, None]}
+            if order.field_type == "metric":
+                ranks[rank] = {
+                    "$switch": {
+                        "branches": [
+                            {"case": missing, "then": 2},
+                            {"case": {"$eq": [reference, {"$literal": float("nan")}]}, "then": 1},
+                        ],
+                        "default": 0,
+                    }
+                }
+            else:
+                ranks[rank] = {"$cond": [missing, 1, 0]}
+            sort[rank] = ASCENDING
+            sort[field] = ASCENDING if order.ascending else DESCENDING
+        pipeline.extend([{"$set": values}, {"$set": ranks}, {"$sort": sort}])
+        if offset:
+            pipeline.append({"$skip": offset})
+        if limit is not None:
+            pipeline.append({"$limit": limit})
+        pipeline.append({"$unset": [*values, *ranks]})
+        with repository_operation("Unable to search runs."):
+            documents = list(self._collection.aggregate(pipeline))
+        return [RunRecord.from_document(document) for document in documents]
+
+    @staticmethod
+    def _search_condition(clause: RunFilter) -> dict:
+        """Filter a run attribute, dataset input, or embedded metric/parameter/tag."""
+        field_type, key, comparator, value = (
+            clause.field_type,
+            clause.key,
+            clause.comparator,
+            clause.value,
+        )
+        if field_type == "attribute":
+            if key == "run_name":
+                return RunRepository._embedded_condition("tag", MLFLOW_RUN_NAME, comparator, value)
+            return RunRepository._attribute_condition(key, comparator, value)
+        if field_type == "dataset":
+            return RunRepository._dataset_condition(key, comparator, value)
+        return RunRepository._embedded_condition(field_type, key, comparator, value)
+
+    @staticmethod
+    def _attribute_condition(key, comparator, value) -> dict:
+        """Filter a non-null top-level run attribute."""
+        field = RunRepository._attribute_field(key)
+        condition = {field: build_value_condition(comparator, value)}
+        return {"$and": [condition, {field: {"$ne": None}}]}
+
+    @staticmethod
+    def _dataset_condition(key, comparator, value) -> dict:
+        """Filter dataset inputs by name, digest, or their context tag."""
+        if key == "context":
+            match = {
+                "tags": {
+                    "$elemMatch": {
+                        "k": MLFLOW_DATASET_CONTEXT,
+                        "v": build_value_condition(comparator, value),
+                    }
+                }
+            }
+            if comparator in ("!=", "NOT IN"):
+                match["tags"]["$elemMatch"] = {
+                    "$and": [match["tags"]["$elemMatch"], {"v": {"$ne": None}}]
+                }
+        else:
+            field = f"dataset.{key}"
+            match = {
+                "$and": [{field: build_value_condition(comparator, value)}, {field: {"$ne": None}}]
+            }
+        return {"inputs.datasets": {"$elemMatch": match}}
+
+    @staticmethod
+    def _embedded_condition(field_type, key, comparator, value) -> dict:
+        """Filter embedded metrics, parameters, or tags by key and value or key existence."""
+        field = RunRepository._embedded_field(field_type)
+        if comparator == "IS NULL":
+            return {field: {"$not": {"$elemMatch": {"k": key}}}}
+        if comparator == "IS NOT NULL":
+            return {field: {"$elemMatch": {"k": key}}}
+        match = {
+            "$and": [
+                {"k": key, "v": build_value_condition(comparator, value)},
+                {"v": {"$ne": None}},
+            ]
+        }
+        if field_type == "metric" and comparator != "!=":
+            # BSON orders NaN numerically; MLflow numeric comparisons must exclude it.
+            match["$and"].append({"v": {"$ne": float("nan")}})
+        return {field: {"$elemMatch": match}}
+
+    @staticmethod
+    def _embedded_field(field_type: str) -> str:
+        if field_type == "metric":
+            return "metrics"
+        if field_type == "parameter":
+            return "params"
+        return "tags"
+
+    @staticmethod
+    def _attribute_field(key: str) -> str:
+        if key == "run_id":
+            return "_id"
+        if key == "run_name":
+            return "name"
+        return key
+
+    @staticmethod
+    def _search_order_value(order: RunOrder) -> dict:
+        if order.field_type == "attribute":
+            field = RunRepository._attribute_field(order.key)
+            return {"$ifNull": [f"${field}", None]}
+        field = RunRepository._embedded_field(order.field_type)
+        return {
+            "$ifNull": [
+                {
+                    "$arrayElemAt": [
+                        {
+                            "$map": {
+                                "input": {
+                                    "$filter": {
+                                        "input": {"$ifNull": [f"${field}", []]},
+                                        "as": "entry",
+                                        "cond": {"$eq": ["$$entry.k", {"$literal": order.key}]},
+                                    }
+                                },
+                                "as": "entry",
+                                "in": "$$entry.v",
+                            }
+                        },
+                        0,
+                    ]
+                },
+                None,
+            ]
+        }
 
     def create(
         self,

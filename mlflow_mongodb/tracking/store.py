@@ -83,6 +83,7 @@ from mlflow_mongodb.tracking.repositories import (
     RunRepository,
 )
 from mlflow_mongodb.tracking.repositories.experiments import ExperimentFilter, ExperimentOrder
+from mlflow_mongodb.tracking.repositories.runs import RunFilter, RunOrder
 from mlflow_mongodb.tracking.types import RunRecord
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,8 @@ class MongoDBTrackingStore(AbstractStore):
     AbstractStore, which delegate persistence to log_batch. Methods outside V1
     remain inherited and are not a claim of support.
     """
+
+    _RUN_ORDER_FIELD_TYPES = frozenset({"attribute", "metric", "parameter", "tag"})
 
     def __init__(self, store_uri: str | None = None, artifact_uri: str | None = None) -> None:
         super().__init__()
@@ -433,6 +436,128 @@ class MongoDBTrackingStore(AbstractStore):
                 f"No tag with name: {key} in experiment with id {experiment_id}",
                 RESOURCE_DOES_NOT_EXIST,
             ) from None
+
+    @handle_persistence_error("Unable to search runs.", logger=logger)
+    def _search_runs(
+        self,
+        experiment_ids: list[str],
+        filter_string: str | None,
+        run_view_type,
+        max_results: int | None,
+        order_by: list[str] | None,
+        page_token: str | None,
+    ) -> tuple[list[Run], str | None]:
+        if max_results is not None:
+            if isinstance(max_results, bool) or not isinstance(max_results, int) or max_results < 1:
+                raise MlflowException(
+                    f"Invalid value {max_results} for parameter 'max_results' supplied. It must be "
+                    "a positive integer",
+                    INVALID_PARAMETER_VALUE,
+                )
+            if max_results > SEARCH_MAX_RESULTS_THRESHOLD:
+                raise MlflowException(
+                    f"Invalid value {max_results} for parameter 'max_results' supplied. It must be "
+                    f"at most {SEARCH_MAX_RESULTS_THRESHOLD}",
+                    INVALID_PARAMETER_VALUE,
+                )
+        stages = LifecycleStage.view_type_to_stages(run_view_type)
+        filters = self._parse_run_filters(filter_string)
+        orders = self._parse_run_order(order_by)
+        offset = SearchUtils.parse_start_offset_from_page_token(page_token)
+        if offset < 0:
+            raise MlflowException("Page offset must not be negative.", INVALID_PARAMETER_VALUE)
+        records = self._run_repository.search(
+            experiment_ids=[str(experiment_id) for experiment_id in experiment_ids],
+            lifecycle_stages=stages,
+            filters=filters,
+            order_by=orders,
+            offset=offset,
+            limit=max_results + 1 if max_results is not None else None,
+        )
+        next_page_token = None
+        if max_results is not None and len(records) > max_results:
+            records = records[:max_results]
+            next_page_token = SearchUtils.create_page_token(offset + max_results)
+        return [self._run_from_record(record) for record in records], next_page_token
+
+    @cached_property
+    def _run_filter_validator(self) -> SearchFilterValidator:
+        return ConfiguredSearchFilterValidator(
+            field_types=("attribute", "metric", "parameter", "tag", "dataset"),
+            attribute_keys=SearchUtils.VALID_SEARCH_ATTRIBUTE_KEYS,
+            comparators={
+                "attribute": SearchUtils.VALID_STRING_ATTRIBUTE_COMPARATORS,
+                "metric": SearchUtils.VALID_METRIC_COMPARATORS,
+                "parameter": SearchUtils.VALID_PARAM_COMPARATORS,
+                "tag": SearchUtils.VALID_TAG_COMPARATORS,
+                "dataset": SearchUtils.VALID_DATASET_COMPARATORS,
+            },
+            field_comparators={
+                ("attribute", key): SearchUtils.VALID_NUMERIC_ATTRIBUTE_COMPARATORS
+                for key in SearchUtils.NUMERIC_ATTRIBUTES
+            },
+        )
+
+    def _parse_run_filters(self, filter_string):
+        filters = []
+        for parsed in SearchUtils.parse_search_filter(filter_string):
+            try:
+                clause = self._run_filter_validator.validate(parsed)
+            except RepositoryUnsupportedFieldTypeError as exc:
+                logger.error("Unable to validate run filter: %s", exc)
+                raise MlflowException.invalid_parameter_value(
+                    f"Invalid search expression type '{exc.field_type}'"
+                ) from None
+            except RepositoryInvalidAttributeError as exc:
+                logger.error("Unable to validate run filter: %s", exc)
+                raise MlflowException.invalid_parameter_value(
+                    f"Invalid attribute name: {exc.key}"
+                ) from None
+            except RepositoryUnsupportedComparatorError as exc:
+                logger.error("Unable to validate run filter: %s", exc)
+                raise MlflowException.invalid_parameter_value(
+                    f"Invalid comparator '{exc.comparator}' for {exc.field_type}.{exc.key}"
+                ) from None
+            filters.append(self._run_filter_from_clause(clause))
+        return tuple(filters)
+
+    @staticmethod
+    def _run_filter_from_clause(clause) -> RunFilter:
+        key = clause.key
+        value = clause.value
+        if clause.comparator in ("IN", "NOT IN"):
+            value = tuple(value)
+        if clause.field_type == "attribute":
+            key = SearchUtils.translate_key_alias(key)
+            if key in SearchUtils.NUMERIC_ATTRIBUTES:
+                value = float(value)
+        elif clause.field_type == "metric":
+            value = float(value)
+        elif clause.field_type == "dataset" and key not in SearchUtils.DATASET_ATTRIBUTES:
+            raise MlflowException.invalid_parameter_value(f"Invalid dataset key: {key}")
+        return RunFilter(clause.field_type, key, clause.comparator, value)
+
+    @classmethod
+    def _parse_run_order(cls, order_by: list[str] | None) -> tuple[RunOrder, ...]:
+        orders = []
+        observed = set()
+        for expression in order_by or []:
+            field_type, key, ascending = SearchUtils.parse_order_by_for_search_runs(expression)
+            if field_type not in cls._RUN_ORDER_FIELD_TYPES:
+                raise MlflowException.invalid_parameter_value(
+                    f"Invalid identifier type '{field_type}'"
+                )
+            if field_type == "attribute":
+                key = SearchUtils.translate_key_alias(key)
+            if (field_type, key) in observed:
+                raise MlflowException(f"`order_by` contains duplicate fields: {order_by}")
+            observed.add((field_type, key))
+            orders.append(RunOrder(field_type, key, ascending))
+        if ("attribute", "start_time") not in observed:
+            orders.append(RunOrder("attribute", "start_time", False))
+        if ("attribute", "run_id") not in observed:
+            orders.append(RunOrder("attribute", "run_id", True))
+        return tuple(orders)
 
     @handle_persistence_error("Unable to create run.", logger=logger)
     def create_run(
