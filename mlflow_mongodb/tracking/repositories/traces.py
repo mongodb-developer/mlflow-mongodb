@@ -21,6 +21,7 @@ from mlflow_mongodb.infrastructure.array_operations import (
     build_remove_array_element_update,
 )
 from mlflow_mongodb.infrastructure.errors import (
+    RepositoryAlreadyExistsError,
     RepositoryNotFoundError,
     RepositoryPersistenceError,
     RepositoryWriteConflictError,
@@ -81,13 +82,12 @@ class TraceRepository:
 
             self._assessments_collection = database[self._settings.assessments_collection_name]
             self._assessments_collection.create_index(
-                [("trace_id", ASCENDING), ("assessment_id", ASCENDING)],
-                unique=True,
-                name="assessments_trace_assessment_unique",
+                [("trace_id", ASCENDING), ("_id", ASCENDING)],
+                name="assessments_trace_id",
             )
             self._assessments_collection.create_index(
-                [("experiment_id", ASCENDING), ("assessment_id", ASCENDING)],
-                name="assessments_experiment_assessment",
+                [("experiment_id", ASCENDING), ("_id", ASCENDING)],
+                name="assessments_experiment_id",
             )
 
     def start_trace(
@@ -254,11 +254,11 @@ class TraceRepository:
             content["trace_id"] = trace_id
             operations.append(
                 ReplaceOne(
-                    {"trace_id": trace_id, "assessment_id": assessment_id},
+                    {"trace_id": trace_id, "_id": assessment_id},
                     {
                         "trace_id": trace_id,
                         "experiment_id": experiment_id,
-                        "assessment_id": assessment_id,
+                        "_id": assessment_id,
                         "content": content,
                     },
                     upsert=True,
@@ -268,6 +268,83 @@ class TraceRepository:
             "Unable to persist trace assessments.", errors=(PyMongoError, BSONError, OverflowError)
         ):
             self._assessments_collection.bulk_write(operations, ordered=True)
+
+    def get_assessment(self, *, trace_id: str, assessment_id: str) -> dict[str, Any]:
+        with repository_operation("Unable to read assessment."):
+            document = self._assessments_collection.find_one(
+                {"trace_id": trace_id, "_id": assessment_id},
+                {"_id": 0, "content": 1},
+            )
+        if document is None:
+            raise RepositoryNotFoundError(assessment_id)
+        return document["content"]
+
+    def create_assessment(
+        self, *, trace_id: str, experiment_id: str, content: dict[str, Any]
+    ) -> dict[str, Any]:
+        document = {
+            "trace_id": trace_id,
+            "experiment_id": experiment_id,
+            "_id": content["assessment_id"],
+            "content": content,
+        }
+        overridden_id = content.get("overrides")
+        with repository_operation(
+            "Unable to create assessment.", errors=(PyMongoError, BSONError, OverflowError)
+        ):
+            if overridden_id:
+                result = self._assessments_collection.update_one(
+                    {"trace_id": trace_id, "_id": overridden_id},
+                    {"$set": {"content.valid": False}},
+                )
+                if not result.matched_count:
+                    raise RepositoryNotFoundError(overridden_id)
+            try:
+                self._assessments_collection.insert_one(document)
+            except DuplicateKeyError as exc:
+                raise RepositoryAlreadyExistsError(content["assessment_id"]) from exc
+        return content
+
+    def update_assessment(
+        self, *, trace_id: str, assessment_id: str, updates: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        fields = {f"content.{key}": {"$literal": value} for key, value in updates.items()}
+        if "metadata" in updates:
+            fields["content.metadata"] = {
+                "$mergeObjects": [
+                    {"$ifNull": ["$content.metadata", {}]},
+                    {"$literal": updates["metadata"]},
+                ]
+            }
+        with repository_operation(
+            "Unable to update assessment.", errors=(PyMongoError, BSONError, OverflowError)
+        ):
+            document = self._assessments_collection.find_one_and_update(
+                {"trace_id": trace_id, "_id": assessment_id},
+                [{"$set": fields}],
+                projection={"_id": 0, "content": 1},
+                return_document=ReturnDocument.AFTER,
+            )
+        if document is None:
+            raise RepositoryNotFoundError(assessment_id)
+        return document["content"]
+
+    def delete_assessment(self, *, trace_id: str, assessment_id: str) -> None:
+        with repository_operation("Unable to delete assessment."):
+            document = self._assessments_collection.find_one(
+                {"trace_id": trace_id, "_id": assessment_id},
+                {"_id": 0, "content": 1},
+            )
+        if document is None:
+            return
+        overridden_id = document["content"].get("overrides")
+        with repository_operation("Unable to delete assessment."):
+            if overridden_id:
+                self._assessments_collection.update_one(
+                    {"trace_id": trace_id, "_id": overridden_id},
+                    {"$set": {"content.valid": True}},
+                )
+            self._assessments_collection.delete_one({"trace_id": trace_id, "_id": assessment_id})
 
     def log_spans(self, documents: list[dict[str, Any]]) -> None:
         """Insert immutable spans; delivery of an existing identity is a no-op."""
@@ -480,7 +557,7 @@ class TraceRepository:
                     "localField": "_id",
                     "foreignField": "trace_id",
                     "pipeline": [
-                        {"$sort": {"assessment_id": ASCENDING}},
+                        {"$sort": {"_id": ASCENDING}},
                         {"$project": {"_id": 0, "content": 1}},
                     ],
                     "as": "_assessments",

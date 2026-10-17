@@ -119,12 +119,12 @@ def test_logged_model_repository_indexes(mongodb_store: MongoDBTrackingStore):
         (
             "assessments_collection_name",
             {
-                "assessments_trace_assessment_unique": {
-                    "key": [("trace_id", 1), ("assessment_id", 1)],
-                    "unique": True,
+                "assessments_trace_id": {
+                    "key": [("trace_id", 1), ("_id", 1)],
+                    "unique": False,
                 },
-                "assessments_experiment_assessment": {
-                    "key": [("experiment_id", 1), ("assessment_id", 1)],
+                "assessments_experiment_id": {
+                    "key": [("experiment_id", 1), ("_id", 1)],
                     "unique": False,
                 },
             },
