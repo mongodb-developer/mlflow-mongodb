@@ -5,9 +5,9 @@ from uuid import UUID
 import pytest
 from mlflow.entities import LifecycleStage
 
-from mlflow_mongodb.tracking.repositories import ExperimentRepository
+from mlflow_mongodb.tracking.repositories import ExperimentRepository, RunRepository
 from mlflow_mongodb.tracking.store import MongoDBTrackingStore
-from mlflow_mongodb.tracking.types import ExperimentRecord, ExperimentTagRecord
+from mlflow_mongodb.tracking.types import ExperimentRecord, ExperimentTagRecord, RunRecord
 
 FIXED_TIMESTAMP = 1_700_000_000_000
 EXPERIMENT_ID = "42"
@@ -59,3 +59,56 @@ def experiment_record_factory():
         )
 
     return factory
+
+
+@pytest.fixture
+def run_repository():
+    return create_autospec(RunRepository, instance=True)
+
+
+@pytest.fixture
+def run_document_factory():
+    def factory(**overrides):
+        document = {
+            "_id": UUID(int=42).hex,
+            "experiment_id": EXPERIMENT_ID,
+            "name": "example-run",
+            "artifact_uri": f"{ARTIFACT_URI}/{EXPERIMENT_ID}/{UUID(int=42).hex}/artifacts",
+            "user_id": "test-user",
+            "status": "RUNNING",
+            "start_time": FIXED_TIMESTAMP,
+            "end_time": None,
+            "lifecycle_stage": LifecycleStage.ACTIVE,
+            "tags": [{"k": "team", "v": "risk"}],
+            "params": [],
+            "metrics": [],
+            "inputs": {"datasets": [], "models": []},
+            "outputs": [],
+        }
+        document.update(overrides)
+        return document
+
+    return factory
+
+
+@pytest.fixture
+def run_record_factory(run_document_factory):
+    def factory(**overrides):
+        return RunRecord.from_document(run_document_factory(**overrides))
+
+    return factory
+
+
+@pytest.fixture
+def run_store(
+    store,
+    run_repository,
+    experiment_repository,
+    experiment_record_factory,
+    run_record_factory,
+):
+    store.__dict__["_run_repository"] = run_repository
+    experiment_repository.find_by_id.return_value = experiment_record_factory()
+    for method in ("create", "find_by_id", "update_info", "mark_deleted", "restore"):
+        getattr(run_repository, method).return_value = run_record_factory()
+    return store

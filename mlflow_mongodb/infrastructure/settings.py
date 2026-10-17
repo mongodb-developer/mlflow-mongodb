@@ -9,13 +9,17 @@ from dataclasses import dataclass
 class MongoDBSettings:
     """Configuration for MongoDB collection names."""
 
+    experiments_collection_name: str = "experiments"
+    runs_collection_name: str = "runs"
+    run_metrics_collection_name: str = "run_metrics"
     registered_models_collection_name: str = "registered_models"
     model_versions_collection_name: str = "model_versions"
-    experiments_collection_name: str = "experiments"
 
     def __post_init__(self) -> None:
         for field_name in (
             "experiments_collection_name",
+            "runs_collection_name",
+            "run_metrics_collection_name",
             "registered_models_collection_name",
             "model_versions_collection_name",
         ):
@@ -36,6 +40,14 @@ class MongoDBSettings:
             experiments_collection_name=environment.get(
                 "MLFLOW_MONGODB_EXPERIMENTS_COLLECTION",
                 cls.experiments_collection_name,
+            ),
+            runs_collection_name=environment.get(
+                "MLFLOW_MONGODB_RUNS_COLLECTION",
+                cls.runs_collection_name,
+            ),
+            run_metrics_collection_name=environment.get(
+                "MLFLOW_MONGODB_RUN_METRICS_COLLECTION",
+                cls.run_metrics_collection_name,
             ),
             registered_models_collection_name=environment.get(
                 "MLFLOW_MONGODB_REGISTERED_MODELS_COLLECTION",

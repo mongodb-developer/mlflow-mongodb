@@ -18,6 +18,8 @@ SERVER_SELECTION_TIMEOUT_MS = 3_000
 
 def _clear_application_collections(store: MongoDBTrackingStore) -> None:
     store._database[store._settings.experiments_collection_name].delete_many({})
+    store._database[store._settings.runs_collection_name].delete_many({})
+    store._database[store._settings.run_metrics_collection_name].delete_many({})
 
 
 @pytest.fixture(scope="session")
@@ -59,6 +61,7 @@ def mongodb_store(mongodb_uri: str) -> Iterator[MongoDBTrackingStore]:
     # Repository construction creates the production indexes. Do this once, outside any
     # future test transaction, then preserve the indexes between tests.
     store._experiment_repository
+    store._run_repository
 
     try:
         yield store
@@ -80,7 +83,22 @@ def store(mongodb_store: MongoDBTrackingStore, clock) -> Iterator[MongoDBTrackin
     try:
         yield mongodb_store
     finally:
-        _clear_application_collections(mongodb_store)
+        try:
+            mongodb_store.shut_down_async_logging()
+        finally:
+            _clear_application_collections(mongodb_store)
+
+
+@pytest.fixture
+def run(store: MongoDBTrackingStore):
+    experiment_id = store.create_experiment("run-experiment")
+    return store.create_run(
+        experiment_id=experiment_id,
+        user_id="test-user",
+        start_time=1_700_000_000_000,
+        tags=[],
+        run_name="functional-run",
+    )
 
 
 @pytest.fixture

@@ -1,10 +1,29 @@
-"""MongoDB tracking store with experiment persistence."""
+"""Skeleton of the MongoDB tracking store for the agreed V1 scope."""
 
 import logging
 from functools import cached_property
 from uuid import uuid4
 
-from mlflow.entities import Experiment, ExperimentTag, LifecycleStage, ViewType
+from mlflow.entities import (
+    Dataset,
+    DatasetInput,
+    Experiment,
+    ExperimentTag,
+    InputTag,
+    LifecycleStage,
+    LoggedModelInput,
+    LoggedModelOutput,
+    Metric,
+    Param,
+    Run,
+    RunData,
+    RunInfo,
+    RunInputs,
+    RunOutputs,
+    RunStatus,
+    RunTag,
+    ViewType,
+)
 from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import (
     INVALID_PARAMETER_VALUE,
@@ -13,10 +32,18 @@ from mlflow.protos.databricks_pb2 import (
     RESOURCE_DOES_NOT_EXIST,
 )
 from mlflow.store.entities.paged_list import PagedList
-from mlflow.store.tracking import SEARCH_MAX_RESULTS_DEFAULT, SEARCH_MAX_RESULTS_THRESHOLD
+from mlflow.store.tracking import (
+    SEARCH_MAX_RESULTS_DEFAULT,
+    SEARCH_MAX_RESULTS_THRESHOLD,
+)
 from mlflow.store.tracking.abstract_store import AbstractStore
 from mlflow.tracking.default_experiment import DEFAULT_EXPERIMENT_ID
-from mlflow.utils.search_utils import SearchExperimentsUtils, SearchUtils
+from mlflow.utils.mlflow_tags import MLFLOW_RUN_NAME, _get_run_name_from_tags
+from mlflow.utils.name_utils import _generate_random_name
+from mlflow.utils.search_utils import (
+    SearchExperimentsUtils,
+    SearchUtils,
+)
 from mlflow.utils.time import get_current_time_millis
 from mlflow.utils.uri import append_to_uri_path, resolve_uri_if_local
 from mlflow.utils.validation import (
@@ -44,14 +71,23 @@ from mlflow_mongodb.infrastructure.search_filters import (
 )
 from mlflow_mongodb.infrastructure.settings import MongoDBSettings
 from mlflow_mongodb.infrastructure.store_errors import handle_persistence_error
-from mlflow_mongodb.tracking.repositories import ExperimentRepository
+from mlflow_mongodb.tracking.repositories import (
+    ExperimentRepository,
+    RunRepository,
+)
 from mlflow_mongodb.tracking.repositories.experiments import ExperimentFilter, ExperimentOrder
+from mlflow_mongodb.tracking.types import RunRecord
 
 logger = logging.getLogger(__name__)
 
 
 class MongoDBTrackingStore(AbstractStore):
-    """Persist experiments in MongoDB; other tracking operations remain inherited."""
+    """MongoDB tracking store with persistence methods awaiting implementation.
+
+    Batch and single-value async logging use the implementations inherited from
+    AbstractStore, which delegate persistence to log_batch. Methods outside V1
+    remain inherited and are not a claim of support.
+    """
 
     def __init__(self, store_uri: str | None = None, artifact_uri: str | None = None) -> None:
         super().__init__()
@@ -97,6 +133,11 @@ class MongoDBTrackingStore(AbstractStore):
             creation_timestamp=get_current_time_millis(),
         )
         return repository
+
+    @cached_property
+    @handle_persistence_error("Unable to initialize run repository.", logger=logger)
+    def _run_repository(self) -> RunRepository:
+        return RunRepository(self._database, settings=self._settings)
 
     @handle_persistence_error("A database operation failed.", logger=logger)
     def search_experiments(
@@ -385,3 +426,207 @@ class MongoDBTrackingStore(AbstractStore):
                 f"No tag with name: {key} in experiment with id {experiment_id}",
                 RESOURCE_DOES_NOT_EXIST,
             ) from None
+
+    @handle_persistence_error("Unable to create run.", logger=logger)
+    def create_run(
+        self,
+        experiment_id: str | None,
+        user_id: str,
+        start_time: int,
+        tags: list[RunTag] | None,
+        run_name: str | None,
+    ) -> Run:
+        experiment_id = None if experiment_id is None else str(experiment_id)
+        experiment = self._experiment_repository.find_by_id(experiment_id)
+        if experiment is None:
+            raise MlflowException(
+                f"No Experiment with id={experiment_id} exists", RESOURCE_DOES_NOT_EXIST
+            )
+        if experiment.lifecycle_stage != LifecycleStage.ACTIVE:
+            raise MlflowException(
+                (
+                    f"The experiment {experiment.experiment_id} must be in the 'active' state. "
+                    f"Current state is {experiment.lifecycle_stage}."
+                ),
+                INVALID_PARAMETER_VALUE,
+            )
+
+        run_id = uuid4().hex
+        artifact_uri = append_to_uri_path(experiment.artifact_location, run_id, "artifacts")
+        run_tags = list(tags or [])
+        run_name_tag = _get_run_name_from_tags(run_tags)
+        if run_name and run_name_tag and run_name != run_name_tag:
+            raise MlflowException(
+                "Both 'run_name' argument and 'mlflow.runName' tag are specified, but with "
+                f"different values (run_name='{run_name}', run_name_tag='{run_name_tag}').",
+                INVALID_PARAMETER_VALUE,
+            )
+        resolved_run_name = run_name or run_name_tag or _generate_random_name()
+        if not run_name_tag:
+            run_tags.append(RunTag(key=MLFLOW_RUN_NAME, value=resolved_run_name))
+
+        try:
+            record = self._run_repository.create(
+                run_id=run_id,
+                experiment_id=experiment_id,
+                name=resolved_run_name,
+                artifact_uri=artifact_uri,
+                user_id=user_id,
+                status=RunStatus.to_string(RunStatus.RUNNING),
+                start_time=start_time,
+                lifecycle_stage=LifecycleStage.ACTIVE,
+                tags={tag.key: tag.value for tag in run_tags},
+            )
+        except RepositoryAlreadyExistsError as exc:
+            logger.error("Unable to create run: %s", exc)
+            raise MlflowException(
+                f"Run with id={run_id} already exists", RESOURCE_ALREADY_EXISTS
+            ) from None
+
+        return Run(
+            RunInfo(
+                run_id=record.run_id,
+                experiment_id=record.experiment_id,
+                user_id=record.user_id,
+                status=record.status,
+                start_time=record.start_time,
+                end_time=record.end_time,
+                lifecycle_stage=record.lifecycle_stage,
+                artifact_uri=record.artifact_uri,
+                run_name=record.name,
+            ),
+            RunData(tags=[RunTag(tag.key, tag.value) for tag in record.tags]),
+            RunInputs(dataset_inputs=[]),
+        )
+
+    @handle_persistence_error("Unable to get run.", logger=logger)
+    def get_run(self, run_id: str) -> Run:
+        record = self._run_repository.find_by_id(run_id)
+        if record is None:
+            raise MlflowException(f"Run with id={run_id} not found", RESOURCE_DOES_NOT_EXIST)
+
+        return self._run_from_record(record)
+
+    @staticmethod
+    def _run_from_record(record: RunRecord) -> Run:
+        return Run(
+            RunInfo(
+                run_id=record.run_id,
+                experiment_id=record.experiment_id,
+                user_id=record.user_id,
+                status=record.status,
+                start_time=record.start_time,
+                end_time=record.end_time,
+                lifecycle_stage=record.lifecycle_stage,
+                artifact_uri=record.artifact_uri,
+                run_name=record.name,
+            ),
+            RunData(
+                params=[Param(param.key, param.value) for param in record.params],
+                metrics=[
+                    Metric(
+                        key=metric.key,
+                        value=metric.value,
+                        timestamp=metric.timestamp,
+                        step=metric.step,
+                        model_id=metric.model_id,
+                        dataset_name=metric.dataset_name,
+                        dataset_digest=metric.dataset_digest,
+                    )
+                    for metric in record.metrics
+                ],
+                tags=[RunTag(tag.key, tag.value) for tag in record.tags],
+            ),
+            RunInputs(
+                dataset_inputs=[
+                    DatasetInput(
+                        dataset=Dataset(
+                            name=dataset.name,
+                            digest=dataset.digest,
+                            source_type=dataset.source_type,
+                            source=dataset.source,
+                            schema=dataset.schema,
+                            profile=dataset.profile,
+                        ),
+                        tags=[InputTag(tag.key, tag.value) for tag in dataset.tags],
+                    )
+                    for dataset in record.dataset_inputs
+                ],
+                model_inputs=[LoggedModelInput(model_id) for model_id in record.model_inputs],
+            ),
+            RunOutputs(
+                model_outputs=[
+                    LoggedModelOutput(model_id=model.model_id, step=model.step)
+                    for model in record.model_outputs
+                ]
+            ),
+        )
+
+    @handle_persistence_error("Unable to delete run.", logger=logger)
+    def delete_run(self, run_id: str) -> None:
+        try:
+            self._run_repository.mark_deleted(
+                run_id=run_id,
+                deleted_time=get_current_time_millis(),
+            )
+        except RepositoryNotFoundError as exc:
+            logger.error("Unable to delete run: %s", exc)
+            raise MlflowException(
+                f"Run with id={run_id} not found", RESOURCE_DOES_NOT_EXIST
+            ) from None
+
+    @handle_persistence_error("Unable to restore run.", logger=logger)
+    def restore_run(self, run_id: str) -> None:
+        try:
+            self._run_repository.restore(run_id=run_id)
+        except RepositoryNotFoundError as exc:
+            logger.error("Unable to restore run: %s", exc)
+            raise MlflowException(
+                f"Run with id={run_id} not found", RESOURCE_DOES_NOT_EXIST
+            ) from None
+
+    @handle_persistence_error("Unable to update run info.", logger=logger)
+    def update_run_info(
+        self,
+        run_id: str,
+        run_status: RunStatus | None,
+        end_time: int | None,
+        run_name: str | None,
+    ) -> RunInfo:
+        run = self._run_repository.find_by_id(run_id)
+        if run is None:
+            raise MlflowException(f"Run with id={run_id} not found", RESOURCE_DOES_NOT_EXIST)
+        if run.lifecycle_stage != LifecycleStage.ACTIVE:
+            raise MlflowException(
+                (
+                    f"The run {run.run_id} must be in the 'active' state. "
+                    f"Current state is {run.lifecycle_stage}."
+                ),
+                INVALID_PARAMETER_VALUE,
+            )
+
+        status = RunStatus.to_string(run_status) if run_status is not None else None
+        try:
+            updated = self._run_repository.update_info(
+                run_id=run_id,
+                status=status,
+                end_time=end_time,
+                run_name=run_name,
+            )
+        except RepositoryNotFoundError as exc:
+            logger.error("Unable to update run info: %s", exc)
+            raise MlflowException(
+                f"Run with id={run_id} not found", RESOURCE_DOES_NOT_EXIST
+            ) from None
+
+        return RunInfo(
+            run_id=updated.run_id,
+            experiment_id=updated.experiment_id,
+            user_id=updated.user_id,
+            status=updated.status,
+            start_time=updated.start_time,
+            end_time=updated.end_time,
+            lifecycle_stage=updated.lifecycle_stage,
+            artifact_uri=updated.artifact_uri,
+            run_name=updated.name,
+        )
