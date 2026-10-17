@@ -12,6 +12,7 @@ class MongoDBSettings:
     experiments_collection_name: str = "experiments"
     runs_collection_name: str = "runs"
     run_metrics_collection_name: str = "run_metrics"
+    logged_models_collection_name: str = "logged_models"
     registered_models_collection_name: str = "registered_models"
     model_versions_collection_name: str = "model_versions"
 
@@ -20,6 +21,7 @@ class MongoDBSettings:
             "experiments_collection_name",
             "runs_collection_name",
             "run_metrics_collection_name",
+            "logged_models_collection_name",
             "registered_models_collection_name",
             "model_versions_collection_name",
         ):
@@ -48,6 +50,10 @@ class MongoDBSettings:
             run_metrics_collection_name=environment.get(
                 "MLFLOW_MONGODB_RUN_METRICS_COLLECTION",
                 cls.run_metrics_collection_name,
+            ),
+            logged_models_collection_name=environment.get(
+                "MLFLOW_MONGODB_LOGGED_MODELS_COLLECTION",
+                cls.logged_models_collection_name,
             ),
             registered_models_collection_name=environment.get(
                 "MLFLOW_MONGODB_REGISTERED_MODELS_COLLECTION",

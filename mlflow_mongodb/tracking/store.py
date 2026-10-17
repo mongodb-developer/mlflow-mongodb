@@ -11,6 +11,7 @@ from mlflow.entities import (
     ExperimentTag,
     InputTag,
     LifecycleStage,
+    LoggedModel,
     LoggedModelInput,
     LoggedModelOutput,
     Metric,
@@ -24,8 +25,12 @@ from mlflow.entities import (
     RunTag,
     ViewType,
 )
+from mlflow.entities.logged_model_parameter import LoggedModelParameter
+from mlflow.entities.logged_model_status import LoggedModelStatus
+from mlflow.entities.logged_model_tag import LoggedModelTag
 from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import (
+    BAD_REQUEST,
     INVALID_PARAMETER_VALUE,
     INVALID_STATE,
     RESOURCE_ALREADY_EXISTS,
@@ -54,6 +59,7 @@ from mlflow.utils.validation import (
     _validate_experiment_artifact_location_length,
     _validate_experiment_name,
     _validate_experiment_tag,
+    _validate_logged_model_name,
     _validate_metric_name,
     _validate_param_keys_unique,
     _validate_run_id,
@@ -80,11 +86,12 @@ from mlflow_mongodb.infrastructure.settings import MongoDBSettings
 from mlflow_mongodb.infrastructure.store_errors import handle_persistence_error
 from mlflow_mongodb.tracking.repositories import (
     ExperimentRepository,
+    LoggedModelRepository,
     RunRepository,
 )
 from mlflow_mongodb.tracking.repositories.experiments import ExperimentFilter, ExperimentOrder
 from mlflow_mongodb.tracking.repositories.runs import RunFilter, RunOrder
-from mlflow_mongodb.tracking.types import RunRecord
+from mlflow_mongodb.tracking.types import LoggedModelRecord, RunMetricRecord, RunRecord
 
 logger = logging.getLogger(__name__)
 
@@ -919,3 +926,159 @@ class MongoDBTrackingStore(AbstractStore):
             ],
             next_token,
         )
+
+    @cached_property
+    @handle_persistence_error("Unable to initialize logged model repository.", logger=logger)
+    def _logged_model_repository(self) -> LoggedModelRepository:
+        return LoggedModelRepository(self._database, settings=self._settings)
+
+    @handle_persistence_error("Unable to create logged model.", logger=logger)
+    def create_logged_model(
+        self,
+        experiment_id: str,
+        name: str | None = None,
+        source_run_id: str | None = None,
+        tags: list[LoggedModelTag] | None = None,
+        params: list[LoggedModelParameter] | None = None,
+        model_type: str | None = None,
+    ) -> LoggedModel:
+        """Create a pending logged model and persist its metadata atomically."""
+        _validate_logged_model_name(name)
+
+        # Preserve SQLAlchemyStore's rejection of duplicate and null entries
+        # before embedding them in arrays in a single MongoDB document.
+        for field, entries in (("params", params), ("tags", tags)):
+            seen_keys = set()
+            for entry in entries or []:
+                if entry.key is None or entry.value is None or entry.key in seen_keys:
+                    raise MlflowException(
+                        f"Logged model {field} must have unique, non-null keys "
+                        "and non-null values.",
+                        BAD_REQUEST,
+                    )
+                seen_keys.add(entry.key)
+
+        experiment = self.get_experiment(experiment_id)
+
+        if experiment.lifecycle_stage != LifecycleStage.ACTIVE:
+            raise MlflowException(
+                (
+                    f"The experiment {experiment.experiment_id} must be in the 'active' state. "
+                    f"Current state is {experiment.lifecycle_stage}."
+                ),
+                INVALID_PARAMETER_VALUE,
+            )
+
+        model_id = f"m-{uuid4().hex}"
+        artifact_location = append_to_uri_path(
+            experiment.artifact_location, "models", model_id, "artifacts"
+        )
+        record = self._logged_model_repository.create(
+            model_id=model_id,
+            experiment_id=experiment.experiment_id,
+            name=name or _generate_random_name(),
+            artifact_location=artifact_location,
+            creation_timestamp=get_current_time_millis(),
+            status=LoggedModelStatus.PENDING.value,
+            lifecycle_stage=LifecycleStage.ACTIVE,
+            source_run_id=source_run_id,
+            model_type=model_type,
+            tags={tag.key: tag.value for tag in tags or []},
+            params={param.key: param.value for param in params or []},
+        )
+
+        return self._to_logged_model(record)
+
+    @staticmethod
+    def _to_logged_model(
+        record: LoggedModelRecord, metrics: tuple[RunMetricRecord, ...] = ()
+    ) -> LoggedModel:
+        return LoggedModel(
+            model_id=record.model_id,
+            experiment_id=record.experiment_id,
+            name=record.name,
+            artifact_location=record.artifact_location,
+            creation_timestamp=record.creation_timestamp,
+            last_updated_timestamp=record.last_updated_timestamp,
+            status=LoggedModelStatus(record.status),
+            status_message=record.status_message,
+            source_run_id=record.source_run_id,
+            model_type=record.model_type,
+            tags=[LoggedModelTag(tag.key, tag.value) for tag in record.tags],
+            params=[LoggedModelParameter(param.key, param.value) for param in record.params],
+            metrics=[
+                Metric(
+                    key=metric.key,
+                    value=metric.value,
+                    timestamp=metric.timestamp,
+                    step=metric.step,
+                    model_id=record.model_id,
+                    run_id=metric.run_id,
+                    dataset_name=metric.dataset_name,
+                    dataset_digest=metric.dataset_digest,
+                )
+                for metric in metrics
+            ]
+            or None,
+        )
+
+    @handle_persistence_error("Unable to get logged model.", logger=logger)
+    def get_logged_model(self, model_id: str, allow_deleted: bool = False) -> LoggedModel:
+        """Fetch model metadata and its complete associated metric history."""
+        record = self._logged_model_repository.find_by_id(model_id)
+        if record is None or (
+            not allow_deleted and record.lifecycle_stage == LifecycleStage.DELETED
+        ):
+            raise MlflowException(
+                f"Logged model with ID '{model_id}' not found.", RESOURCE_DOES_NOT_EXIST
+            )
+        metrics = self._logged_model_repository.get_metric_history(record.model_id)
+
+        return self._to_logged_model(record, metrics)
+
+    @handle_persistence_error("Unable to delete logged model.", logger=logger)
+    def delete_logged_model(self, model_id: str) -> None:
+        """Soft-delete a logged model and refresh its last-updated timestamp."""
+        try:
+            self._logged_model_repository.mark_deleted(
+                model_id=model_id,
+                last_updated_timestamp=get_current_time_millis(),
+            )
+        except RepositoryNotFoundError as exc:
+            logger.error("Unable to delete logged model: %s", exc)
+            raise MlflowException(
+                f"Logged model with ID '{model_id}' not found.", RESOURCE_DOES_NOT_EXIST
+            ) from None
+
+    @handle_persistence_error("Unable to set logged model tags.", logger=logger)
+    def set_logged_model_tags(self, model_id: str, tags: list[LoggedModelTag]) -> None:
+        """Set model tags, keeping the last value for each key in the batch."""
+        tags_by_key = {tag.key: tag.value for tag in tags}
+        if any(k is None or v is None for k, v in tags_by_key.items()):
+            raise MlflowException(
+                "Logged model tags must have non-null keys and values.", BAD_REQUEST
+            )
+        try:
+            self._logged_model_repository.set_tags(model_id=model_id, tags=tags_by_key)
+        except RepositoryNotFoundError as exc:
+            logger.error("Unable to set logged model tags: %s", exc)
+            raise MlflowException(
+                f"Logged model with ID '{model_id}' not found.", RESOURCE_DOES_NOT_EXIST
+            ) from None
+
+    @handle_persistence_error("Unable to delete logged model tag.", logger=logger)
+    def delete_logged_model_tag(self, model_id: str, key: str) -> None:
+        """Delete a model tag, failing if the model or tag does not exist."""
+        try:
+            self._logged_model_repository.delete_tag(model_id=model_id, key=key)
+        except RepositoryNotFoundError as exc:
+            logger.error("Unable to delete logged model tag: %s", exc)
+            raise MlflowException(
+                f"Logged model with ID '{model_id}' not found.", RESOURCE_DOES_NOT_EXIST
+            ) from None
+        except RepositoryTagNotFoundError as exc:
+            logger.error("Unable to delete logged model tag: %s", exc)
+            raise MlflowException(
+                f"No tag with key {key!r} found for model with ID {model_id!r}.",
+                RESOURCE_DOES_NOT_EXIST,
+            ) from None
