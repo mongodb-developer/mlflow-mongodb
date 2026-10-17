@@ -61,6 +61,11 @@ MongoDB. On MLflow 3.6 and newer servers, modern clients use MongoDB-backed trac
 A 3.5 client cannot read a trace written only to MongoDB by a modern client unless an
 artifact payload also exists. Cross-version reads of that kind are not guaranteed.
 
+Aggregated trace metric queries require MLflow 3.9 or newer; available metrics and dimensions
+depend on the installed MLflow version. Older versions preserve native MLflow spans without
+newer OTel translations, and derive cost summaries only when MLflow provides its cost aggregator.
+These limitations do not disable run metric logging.
+
 ## Documentation
 
 New to MLflow? Start with the [MLflow Tracking Quickstart](https://mlflow.org/docs/latest/ml/getting-started/quickstart/).
