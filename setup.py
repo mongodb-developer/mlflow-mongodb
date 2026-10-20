@@ -8,7 +8,7 @@ ROOT = Path(__file__).parent
 setup(
     name="mlflow-mongodb",
     version="0.1.0.dev0",
-    description="MongoDB model registry store plugin for MLflow",
+    description="MongoDB backend for MLflow tracking and model registry",
     long_description=(ROOT / "README.md").read_text(encoding="utf-8"),
     long_description_content_type="text/markdown",
     url="https://github.com/mongodb-developer/mlflow-mongodb",
