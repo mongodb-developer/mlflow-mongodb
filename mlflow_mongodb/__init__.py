@@ -1,4 +1,4 @@
-"""MongoDB model registry store plugin for MLflow."""
+"""MongoDB backend for MLflow tracking and model registry."""
 
 from mlflow_mongodb._version import __version__
 
