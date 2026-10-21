@@ -21,13 +21,11 @@ python -m pip install "mlflow-mongodb>=0.1.0.dev0"
 
 ## Running MLflow
 
-The tracking store and registered-model store are configured independently, and each can use
-MongoDB or another MLflow backend. For example, the following configuration keeps experiments
-and runs in SQLite and stores registered models and their versions in MongoDB:
+The following configuration stores both tracking data and registry data in MongoDB:
 
 ```bash
-export TRACKING_STORE_URI="sqlite:///tracking.db"
-export REGISTRY_STORE_URI="mongodb://localhost:27017/mlflow_registry"
+export TRACKING_STORE_URI="mongodb://localhost:27017/mlflow"
+export REGISTRY_STORE_URI="mongodb://localhost:27017/mlflow"
 export MLFLOW_BIND_HOST="127.0.0.1"
 export MLFLOW_BIND_PORT="5000"
 
@@ -38,30 +36,18 @@ mlflow server \
   --port "${MLFLOW_BIND_PORT}"
 ```
 
-To store tracking data in MongoDB as well, set `TRACKING_STORE_URI` to a MongoDB URI:
-
-```bash
-export TRACKING_STORE_URI="mongodb://localhost:27017/mlflow_tracking"
-```
-
-> [NOTE]
-> The MongoDB tracking store does not yet implement `finalize_logged_model`, so MLflow 3
-> `mlflow.<flavor>.log_model(...)` calls fail when tracking data is stored in MongoDB. Datasets,
-> scorers, and review queues are also not yet supported, and MLflow server job execution is
-> disabled because it requires a SQL backend store.
-
 Open `http://127.0.0.1:5000` to use the MLflow UI. Clients can connect to the server with:
 
 ```bash
 export MLFLOW_TRACKING_URI="http://127.0.0.1:5000"
 ```
 
-The MongoDB URI must include the database name; `mlflow_registry` is the database name in
-the example above. Authentication, replica-set, TLS, and other connection options can be
-provided using standard MongoDB URI syntax. For example:
+The MongoDB URI must include the database name; `mlflow` is the database name in the example
+above. Authentication, replica-set, TLS, and other connection options can be provided using
+standard MongoDB URI syntax. For example:
 
 ```text
-mongodb://username:password@mongo.example.com:27017/mlflow_registry?authSource=admin
+mongodb://username:password@mongo.example.com:27017/mlflow?authSource=admin
 ```
 
 When using the MongoDB tracking backend, MLflow 3.5 clients upload full trace payloads to
@@ -144,7 +130,7 @@ python -m pytest tests/functional
 ```
 
 Authentication, replica-set, TLS, and other standard MongoDB URI options can be included in
-`MONGODB_URI`. CI runs the functional suite against a MongoDB 8.0 replica set.
+`MONGODB_URI`. Use a MongoDB 8.0 replica set when running tests that exercise MongoDB transactions.
 
 The functional suite deletes documents from its application collections after every test so
 their indexes can be reused. At the end of the test session, it drops the database selected by
