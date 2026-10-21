@@ -1,13 +1,23 @@
+import re
 from pathlib import Path
 
 from setuptools import find_packages, setup
 
 ROOT = Path(__file__).parent
 
+# Read the version without importing the package, whose dependencies may not be installed yet.
+VERSION = re.search(
+    r'^__version__ = "([^"]+)"$',
+    (ROOT / "mlflow_mongodb" / "_version.py").read_text(encoding="utf-8"),
+    re.MULTILINE,
+)
+if VERSION is None:
+    raise RuntimeError("Unable to find __version__ in mlflow_mongodb/_version.py")
+
 
 setup(
     name="mlflow-mongodb",
-    version="0.1.0.dev0",
+    version=VERSION.group(1),
     description="MongoDB backend for MLflow tracking and model registry",
     long_description=(ROOT / "README.md").read_text(encoding="utf-8"),
     long_description_content_type="text/markdown",
