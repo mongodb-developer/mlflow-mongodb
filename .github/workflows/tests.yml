@@ -58,8 +58,6 @@ jobs:
             python_version: "3.14"
             mlflow_spec: mlflow>=3.5,<4
             pymongo_spec: pymongo>=4.9,<5
-    env:
-      MONGODB_URI: mongodb://localhost:27017/mlflow_ci_test?replicaSet=test-rs
     steps:
       - name: Check out repository
         uses: actions/checkout@v7.0.1
@@ -73,10 +71,22 @@ jobs:
           cache: pip
 
       - name: Start MongoDB 8.0 replica set
-        uses: supercharge/mongodb-github-action@315db7fe45ac2880b7758f1933e6e5d59afd5e94 # 1.12.1
+        id: setup-mongodb
+        uses: mongodb-labs/drivers-evergreen-tools@354a81692bfd2b654a38277b681d248507d17800 # v1.2.0
         with:
-          mongodb-version: "8.0"
-          mongodb-replica-set: test-rs
+          version: "8.0"
+          topology: replica_set
+
+      - name: Set MONGODB_URI
+        env:
+          CLUSTER_URI: ${{ steps.setup-mongodb.outputs.cluster-uri }}
+        run: |
+          uri="${CLUSTER_URI/\/\?/\/mlflow_ci_test?}"
+          if [[ "$uri" == "$CLUSTER_URI" ]]; then
+            echo "Unexpected cluster URI format: $CLUSTER_URI" >&2
+            exit 1
+          fi
+          echo "MONGODB_URI=$uri" >> "$GITHUB_ENV"
 
       - name: Install test stack
         run: |
