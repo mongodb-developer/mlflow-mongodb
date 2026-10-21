@@ -1,17 +1,18 @@
-# MongoDB Backend for MLflow Registered Models
+# MongoDB Backend for MLflow
 
 > [WARNING]
 > This project is under active development and has not reached a stable release. APIs, storage
 > formats, and configuration may change at any time without notice. **It is not intended for
 > production use.** See [LICENSE](LICENSE) for the full disclaimer of warranties.
 
-An MLflow plugin that stores registered models, versions, aliases, tags, and related metadata
-in MongoDB. MLflow tracking data, such as experiments and runs, remains in a separate backend
-store.
+An MLflow plugin that stores tracking data (experiments, runs, traces, and logged models) and
+model registry data (registered models, versions, aliases, tags, and prompts) in MongoDB. The
+tracking store and registry store are configured independently, so either one can use MongoDB
+while the other uses another MLflow backend.
 
 ## Installation
 
-Python 3.10 or newer, MLflow 3.5 or newer within the 3.x series, and a MongoDB deployment
+Python 3.10 or newer, MLflow 3.5 or newer within the 3.x series, and MongoDB 8.0 or newer
 are required.
 
 ```bash
@@ -20,9 +21,9 @@ python -m pip install "mlflow-mongodb>=0.1.0.dev0"
 
 ## Running MLflow
 
-The tracking store and registered-model store are configured independently. For example, the
-following configuration keeps experiments and runs in SQLite and stores registered models
-and their versions in MongoDB:
+The tracking store and registered-model store are configured independently, and each can use
+MongoDB or another MLflow backend. For example, the following configuration keeps experiments
+and runs in SQLite and stores registered models and their versions in MongoDB:
 
 ```bash
 export TRACKING_STORE_URI="sqlite:///tracking.db"
@@ -36,6 +37,18 @@ mlflow server \
   --host "${MLFLOW_BIND_HOST}" \
   --port "${MLFLOW_BIND_PORT}"
 ```
+
+To store tracking data in MongoDB as well, set `TRACKING_STORE_URI` to a MongoDB URI:
+
+```bash
+export TRACKING_STORE_URI="mongodb://localhost:27017/mlflow_tracking"
+```
+
+> [NOTE]
+> The MongoDB tracking store does not yet implement `finalize_logged_model`, so MLflow 3
+> `mlflow.<flavor>.log_model(...)` calls fail when tracking data is stored in MongoDB. Datasets,
+> scorers, and review queues are also not yet supported, and MLflow server job execution is
+> disabled because it requires a SQL backend store.
 
 Open `http://127.0.0.1:5000` to use the MLflow UI. Clients can connect to the server with:
 
@@ -123,8 +136,7 @@ mode with its development dependencies before running them:
 python -m pip install -e ".[dev]"
 ```
 
-Set `MONGODB_URI` to a dedicated test database. The database name must contain `test` as a
-distinct hyphen- or underscore-separated segment; for example:
+Set `MONGODB_URI` to a dedicated test database; for example:
 
 ```bash
 export MONGODB_URI="mongodb://localhost:27017/mlflow_functional_test"
@@ -132,7 +144,7 @@ python -m pytest tests/functional
 ```
 
 Authentication, replica-set, TLS, and other standard MongoDB URI options can be included in
-`MONGODB_URI`. Use a replica set when running tests that exercise MongoDB transactions.
+`MONGODB_URI`. CI runs the functional suite against a MongoDB 8.0 replica set.
 
 The functional suite deletes documents from its application collections after every test so
 their indexes can be reused. At the end of the test session, it drops the database selected by
