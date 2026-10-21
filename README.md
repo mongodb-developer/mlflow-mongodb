@@ -1,13 +1,14 @@
-# MongoDB Backend for MLflow Registered Models
+# MongoDB Backend for MLflow
 
 > [WARNING]
 > This project is under active development and has not reached a stable release. APIs, storage
 > formats, and configuration may change at any time without notice. **It is not intended for
 > production use.** See [LICENSE](LICENSE) for the full disclaimer of warranties.
 
-An MLflow plugin that stores registered models, versions, aliases, tags, and related metadata
-in MongoDB. MLflow tracking data, such as experiments and runs, remains in a separate backend
-store.
+An MLflow plugin that stores tracking data (experiments, runs, traces, and logged models) and
+model registry data (registered models, versions, aliases, tags, and prompts) in MongoDB. The
+tracking store and registry store can be configured independently, so each can point at MongoDB,
+another supported backend, or a mix of the two.
 
 ## Installation
 
@@ -20,9 +21,9 @@ python -m pip install "mlflow-mongodb>=0.1.0.dev0"
 
 ## Running MLflow
 
-The tracking store and registered-model store are configured independently. For example, the
-following configuration keeps experiments and runs in SQLite and stores registered models
-and their versions in MongoDB:
+The tracking store and registered-model store are configured independently, and each can use
+MongoDB or any other MLflow-supported backend. For example, the following configuration keeps
+experiments and runs in SQLite while storing registered models and their versions in MongoDB:
 
 ```bash
 export TRACKING_STORE_URI="sqlite:///tracking.db"
@@ -35,6 +36,12 @@ mlflow server \
   --registry-store-uri "${REGISTRY_STORE_URI}" \
   --host "${MLFLOW_BIND_HOST}" \
   --port "${MLFLOW_BIND_PORT}"
+```
+
+To store tracking data in MongoDB as well, point `TRACKING_STORE_URI` at a MongoDB URI instead:
+
+```bash
+export TRACKING_STORE_URI="mongodb://localhost:27017/mlflow_tracking"
 ```
 
 Open `http://127.0.0.1:5000` to use the MLflow UI. Clients can connect to the server with:
