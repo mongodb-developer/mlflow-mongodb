@@ -81,7 +81,7 @@ jobs:
         env:
           CLUSTER_URI: ${{ steps.setup-mongodb.outputs.cluster-uri }}
         run: |
-          uri="${CLUSTER_URI/\/?/\/mlflow_ci_test?}"
+          uri="${CLUSTER_URI/\/\?/\/mlflow_ci_test?}"
           if [[ "$uri" == "$CLUSTER_URI" ]]; then
             echo "Unexpected cluster URI format: $CLUSTER_URI" >&2
             exit 1
