@@ -8,7 +8,7 @@ from mlflow.entities.model_registry import ModelVersionTag, RegisteredModelTag
 from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import RESOURCE_DOES_NOT_EXIST, ErrorCode
 
-from mlflow_mongodb import MongoDBModelRegistryStore
+from mlflow_mongodb.model_registry.store import MongoDBModelRegistryStore
 
 MODEL_NAME = "mongodb-functional-model"
 RENAMED_MODEL_NAME = "mongodb-functional-model-renamed"

@@ -7,7 +7,7 @@ import pytest
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
 
-from mlflow_mongodb import MongoDBModelRegistryStore
+from mlflow_mongodb.model_registry.store import MongoDBModelRegistryStore
 
 MONGODB_URI_ENV_VAR = "MONGODB_URI"
 SERVER_SELECTION_TIMEOUT_MS = 3_000
