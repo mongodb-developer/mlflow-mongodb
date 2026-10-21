@@ -44,6 +44,12 @@ To store tracking data in MongoDB as well, point `TRACKING_STORE_URI` at a Mongo
 export TRACKING_STORE_URI="mongodb://localhost:27017/mlflow_tracking"
 ```
 
+> [NOTE]
+> The MongoDB tracking store does not yet implement `finalize_logged_model`, so MLflow 3
+> `mlflow.<flavor>.log_model(...)` calls fail when tracking data is stored in MongoDB. Datasets,
+> scorers, and review queues are also not yet supported, and MLflow server job execution is
+> disabled because it requires a SQL backend store.
+
 Open `http://127.0.0.1:5000` to use the MLflow UI. Clients can connect to the server with:
 
 ```bash
