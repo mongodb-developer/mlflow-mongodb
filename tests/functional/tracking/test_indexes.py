@@ -34,8 +34,20 @@ def test_run_repository_indexes(mongodb_store: MongoDBTrackingStore):
     run_indexes = database[settings.runs_collection_name].index_information()
     metric_indexes = database[settings.run_metrics_collection_name].index_information()
 
-    assert run_indexes[RunRepository.EXPERIMENT_INDEX]["key"] == [("experiment_id", 1)]
-    assert not run_indexes[RunRepository.EXPERIMENT_INDEX].get("unique", False)
+    assert run_indexes[RunRepository.TAG_INDEX]["key"] == [
+        ("experiment_id", 1),
+        ("lifecycle_stage", 1),
+        ("tags.k", 1),
+        ("tags.v", 1),
+    ]
+    assert not run_indexes[RunRepository.TAG_INDEX].get("unique", False)
+    assert run_indexes["runs_experiment_lifecycle_start_time_id"]["key"] == [
+        ("experiment_id", 1),
+        ("lifecycle_stage", 1),
+        ("start_time", -1),
+        ("_id", 1),
+    ]
+    assert not run_indexes["runs_experiment_lifecycle_start_time_id"].get("unique", False)
     assert metric_indexes["run_metrics_run_k_timestamp"]["key"] == [
         ("run_id", 1),
         ("k", 1),

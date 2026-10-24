@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, Mock, call
 import pytest
 from bson.errors import InvalidBSON, InvalidDocument
 from mlflow.entities import LifecycleStage
-from pymongo import ASCENDING, ReturnDocument
+from pymongo import ASCENDING, DESCENDING, ReturnDocument
 from pymongo.errors import DuplicateKeyError, OperationFailure
 
 import mlflow_mongodb.tracking.repositories.runs as run_module
@@ -61,9 +61,26 @@ def test_initialization_selects_configured_collections_and_creates_indexes():
     assert repository._collection is runs
     assert repository._metrics_collection is metrics
     assert database.__getitem__.call_args_list == [call("custom_runs"), call("custom_metrics")]
-    runs.create_index.assert_called_once_with(
-        [("experiment_id", ASCENDING)], name=RunRepository.EXPERIMENT_INDEX
-    )
+    assert runs.create_index.call_args_list == [
+        call(
+            [
+                ("experiment_id", ASCENDING),
+                ("lifecycle_stage", ASCENDING),
+                ("tags.k", ASCENDING),
+                ("tags.v", ASCENDING),
+            ],
+            name=RunRepository.TAG_INDEX,
+        ),
+        call(
+            [
+                ("experiment_id", ASCENDING),
+                ("lifecycle_stage", ASCENDING),
+                ("start_time", DESCENDING),
+                ("_id", ASCENDING),
+            ],
+            name="runs_experiment_lifecycle_start_time_id",
+        ),
+    ]
     assert metrics.create_index.call_args_list == [
         call(
             [("run_id", ASCENDING), ("k", ASCENDING), ("timestamp", ASCENDING)],
