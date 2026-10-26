@@ -93,6 +93,8 @@ class TraceSearchOrder:
 class TraceRepository:
     """Own trace metadata and the separate span and assessment collections."""
 
+    TAG_INDEX = "traces_experiment_tags_k_v"
+
     _TIME_BUCKET_LABEL = "time_bucket"
     _ASSESSMENT_TYPE_FIELDS: Final = MappingProxyType(
         {
@@ -116,6 +118,10 @@ class TraceRepository:
         with repository_operation("Unable to initialize trace repository."):
             self._collection = database[self._settings.traces_collection_name]
             # _id is the supplied trace ID and already has a unique index.
+            self._collection.create_index(
+                [("experiment_id", ASCENDING), ("tags.k", ASCENDING), ("tags.v", ASCENDING)],
+                name=self.TAG_INDEX,
+            )
             self._collection.create_index(
                 [("experiment_id", ASCENDING), ("request_time", ASCENDING), ("_id", ASCENDING)],
                 name="traces_experiment_request_time_id",

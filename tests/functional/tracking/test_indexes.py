@@ -1,6 +1,10 @@
 import pytest
 
-from mlflow_mongodb.tracking.repositories import ExperimentRepository, RunRepository
+from mlflow_mongodb.tracking.repositories import (
+    ExperimentRepository,
+    RunRepository,
+    TraceRepository,
+)
 from mlflow_mongodb.tracking.store import MongoDBTrackingStore
 
 
@@ -97,6 +101,10 @@ def test_logged_model_repository_indexes(mongodb_store: MongoDBTrackingStore):
         (
             "traces_collection_name",
             {
+                TraceRepository.TAG_INDEX: {
+                    "key": [("experiment_id", 1), ("tags.k", 1), ("tags.v", 1)],
+                    "unique": False,
+                },
                 "traces_experiment_request_time_id": {
                     "key": [("experiment_id", 1), ("request_time", 1), ("_id", 1)],
                     "unique": False,
