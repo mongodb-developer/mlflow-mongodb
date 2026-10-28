@@ -361,16 +361,21 @@ class MongoDBTrackingStore(AbstractStore):
     @handle_persistence_error("Unable to delete experiment.", logger=logger)
     def delete_experiment(self, experiment_id: str) -> None:
         experiment_id = self._parse_experiment_id(experiment_id)
+        now = get_current_time_millis()
         try:
             self._experiment_repository.mark_deleted(
                 experiment_id=experiment_id,
-                last_update_time=get_current_time_millis(),
+                last_update_time=now,
             )
         except RepositoryNotFoundError as exc:
             logger.error("Unable to delete experiment: %s", exc)
             raise MlflowException(
                 f"No Experiment with id={experiment_id} exists", RESOURCE_DOES_NOT_EXIST
             ) from None
+        self._run_repository.mark_all_deleted(
+            experiment_id=str(experiment_id),
+            deleted_time=now,
+        )
 
     @handle_persistence_error("Unable to restore experiment.", logger=logger)
     def restore_experiment(self, experiment_id: str) -> None:
@@ -385,6 +390,8 @@ class MongoDBTrackingStore(AbstractStore):
             raise MlflowException(
                 f"No Experiment with id={experiment_id} exists", RESOURCE_DOES_NOT_EXIST
             ) from None
+
+        self._run_repository.restore_all(experiment_id=str(experiment_id))
 
     @handle_persistence_error("Unable to rename experiment.", logger=logger)
     def rename_experiment(self, experiment_id: str, new_name: str) -> None:

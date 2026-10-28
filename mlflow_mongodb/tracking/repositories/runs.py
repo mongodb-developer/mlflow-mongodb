@@ -89,6 +89,25 @@ class RunRepository:
             updates={"deleted_time": deleted_time},
         )
 
+    def mark_all_deleted(self, *, experiment_id: str, deleted_time: int) -> None:
+        with repository_operation("Unable to delete experiment runs."):
+            self._collection.update_many(
+                {"experiment_id": experiment_id},
+                {
+                    "$set": {
+                        "lifecycle_stage": LifecycleStage.DELETED,
+                        "deleted_time": deleted_time,
+                    }
+                },
+            )
+
+    def restore_all(self, *, experiment_id: str) -> None:
+        with repository_operation("Unable to restore experiment runs."):
+            self._collection.update_many(
+                {"experiment_id": experiment_id},
+                {"$set": {"lifecycle_stage": LifecycleStage.ACTIVE, "deleted_time": None}},
+            )
+
     def restore(self, *, run_id: str | None) -> RunRecord:
         return self._transition_lifecycle(
             run_id=run_id,

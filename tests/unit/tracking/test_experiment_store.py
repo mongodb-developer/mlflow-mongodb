@@ -221,8 +221,8 @@ def test_get_experiment_by_name_returns_none_when_missing(store, experiment_repo
     experiment_repository.find_by_name.assert_called_once_with("missing")
 
 
-def test_delete_experiment_passes_id_and_timestamp(store, experiment_repository):
-    assert store.delete_experiment(EXPERIMENT_ID) is None
+def test_delete_experiment_passes_id_and_timestamp(run_store, experiment_repository):
+    assert run_store.delete_experiment(EXPERIMENT_ID) is None
 
     experiment_repository.mark_deleted.assert_called_once_with(
         experiment_id=42, last_update_time=FIXED_TIMESTAMP
@@ -241,8 +241,8 @@ def test_delete_experiment_translates_missing_or_inactive_experiment(store, expe
     )
 
 
-def test_restore_experiment_passes_id_and_timestamp(store, experiment_repository):
-    assert store.restore_experiment(EXPERIMENT_ID) is None
+def test_restore_experiment_passes_id_and_timestamp(run_store, experiment_repository):
+    assert run_store.restore_experiment(EXPERIMENT_ID) is None
 
     experiment_repository.restore.assert_called_once_with(
         experiment_id=42, last_update_time=FIXED_TIMESTAMP

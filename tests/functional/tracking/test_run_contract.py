@@ -102,6 +102,100 @@ def test_update_run_info_persists_status_end_time_and_literal_name(store, run):
     assert loaded.data.tags[MLFLOW_RUN_NAME] == "$renamed"
 
 
+def test_restore_run_restores_individually_deleted_run(store, run, clock):
+    run_id = run.info.run_id
+    original = _stored_run(store, run_id)
+    experiment = store.get_experiment(run.info.experiment_id)
+    store.delete_run(run_id)
+    deleted = _stored_run(store, run_id)
+    assert deleted["lifecycle_stage"] == LifecycleStage.DELETED
+    assert deleted["deleted_time"] == clock["now"]
+    clock["now"] += 1000
+
+    assert store.restore_run(run_id) is None
+
+    assert store.get_run(run_id).info.lifecycle_stage == LifecycleStage.ACTIVE
+    assert _stored_run(store, run_id) == {
+        **original,
+        "deleted_time": None,
+    }
+    parent = store.get_experiment(run.info.experiment_id)
+    assert parent.lifecycle_stage == LifecycleStage.ACTIVE
+    assert parent.last_update_time == experiment.last_update_time
+
+
+def test_restore_run_keeps_parent_experiment_deleted(store, run, clock):
+    run_id = run.info.run_id
+    original = _stored_run(store, run_id)
+    store.delete_experiment(run.info.experiment_id)
+    experiment = store.get_experiment(run.info.experiment_id)
+    assert experiment.lifecycle_stage == LifecycleStage.DELETED
+    deleted = _stored_run(store, run_id)
+    assert deleted["lifecycle_stage"] == LifecycleStage.DELETED
+    assert deleted["deleted_time"] == clock["now"]
+    clock["now"] += 1000
+
+    assert store.restore_run(run_id) is None
+
+    assert store.get_run(run_id).info.lifecycle_stage == LifecycleStage.ACTIVE
+    assert _stored_run(store, run_id) == {
+        **original,
+        "deleted_time": None,
+    }
+    parent = store.get_experiment(run.info.experiment_id)
+    assert parent.lifecycle_stage == LifecycleStage.DELETED
+    assert parent.last_update_time == experiment.last_update_time
+
+
+def test_experiment_delete_restore_cascades_to_all_its_runs(store, clock):
+    experiment_id = store.create_experiment("cascade-parent")
+    other_experiment_id = store.create_experiment("unrelated-parent")
+    runs = [
+        store.create_run(experiment_id, "test-user", 1000, [RunTag("team", "risk")], name)
+        for name in ("active-run", "previously-deleted-run")
+    ]
+    other_runs = [
+        store.create_run(other_experiment_id, "test-user", 1000, [], name)
+        for name in ("unrelated-active-run", "unrelated-deleted-run")
+    ]
+    store.delete_run(runs[1].info.run_id)
+    store.delete_run(other_runs[1].info.run_id)
+    original_documents = [_stored_run(store, run.info.run_id) for run in runs]
+    other_documents = [_stored_run(store, run.info.run_id) for run in other_runs]
+    clock["now"] += 1000
+
+    assert store.delete_experiment(experiment_id) is None
+
+    deleted_experiment = store.get_experiment(experiment_id)
+    assert deleted_experiment.lifecycle_stage == LifecycleStage.DELETED
+    assert deleted_experiment.last_update_time == clock["now"]
+    for run, original in zip(runs, original_documents, strict=True):
+        assert store.get_run(run.info.run_id).info.lifecycle_stage == LifecycleStage.DELETED
+        assert _stored_run(store, run.info.run_id) == {
+            **original,
+            "lifecycle_stage": LifecycleStage.DELETED,
+            "deleted_time": clock["now"],
+        }
+    assert [_stored_run(store, run.info.run_id) for run in other_runs] == other_documents
+    assert store.get_experiment(other_experiment_id).lifecycle_stage == LifecycleStage.ACTIVE
+    clock["now"] += 1000
+
+    assert store.restore_experiment(experiment_id) is None
+
+    restored_experiment = store.get_experiment(experiment_id)
+    assert restored_experiment.lifecycle_stage == LifecycleStage.ACTIVE
+    assert restored_experiment.last_update_time == clock["now"]
+    for run, original in zip(runs, original_documents, strict=True):
+        assert store.get_run(run.info.run_id).info.lifecycle_stage == LifecycleStage.ACTIVE
+        assert _stored_run(store, run.info.run_id) == {
+            **original,
+            "lifecycle_stage": LifecycleStage.ACTIVE,
+            "deleted_time": None,
+        }
+    assert [_stored_run(store, run.info.run_id) for run in other_runs] == other_documents
+    assert store.get_experiment(other_experiment_id).lifecycle_stage == LifecycleStage.ACTIVE
+
+
 @pytest.mark.parametrize("missing", [False, True])
 def test_repository_update_info_rejects_unmatched_runs_without_changes(store, run, missing):
     run_id = "f" * 32 if missing else run.info.run_id
