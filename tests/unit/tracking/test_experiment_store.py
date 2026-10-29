@@ -229,11 +229,13 @@ def test_delete_experiment_passes_id_and_timestamp(run_store, experiment_reposit
     )
 
 
-def test_delete_experiment_translates_missing_or_inactive_experiment(store, experiment_repository):
+def test_delete_experiment_translates_missing_or_inactive_experiment(
+    run_store, experiment_repository
+):
     experiment_repository.mark_deleted.side_effect = RepositoryNotFoundError("Private lifecycle")
 
     with pytest.raises(MlflowException, match="No Experiment with id=42 exists") as caught:
-        store.delete_experiment(EXPERIMENT_ID)
+        run_store.delete_experiment(EXPERIMENT_ID)
 
     assert caught.value.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST)
     experiment_repository.mark_deleted.assert_called_once_with(
@@ -249,11 +251,13 @@ def test_restore_experiment_passes_id_and_timestamp(run_store, experiment_reposi
     )
 
 
-def test_restore_experiment_translates_missing_or_active_experiment(store, experiment_repository):
+def test_restore_experiment_translates_missing_or_active_experiment(
+    run_store, experiment_repository
+):
     experiment_repository.restore.side_effect = RepositoryNotFoundError("Private lifecycle")
 
     with pytest.raises(MlflowException, match="No Experiment with id=42 exists") as caught:
-        store.restore_experiment(EXPERIMENT_ID)
+        run_store.restore_experiment(EXPERIMENT_ID)
 
     assert caught.value.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST)
     experiment_repository.restore.assert_called_once_with(

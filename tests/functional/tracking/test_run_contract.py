@@ -17,8 +17,6 @@ from mlflow.protos.databricks_pb2 import (
 )
 from mlflow.utils.mlflow_tags import MLFLOW_RUN_NAME
 
-from mlflow_mongodb.infrastructure.errors import RepositoryNotFoundError
-
 
 def _stored_run(store, run_id):
     return store._database[store._settings.runs_collection_name].find_one({"_id": run_id})
@@ -196,19 +194,25 @@ def test_experiment_delete_restore_cascades_to_all_its_runs(store, clock):
     assert store.get_experiment(other_experiment_id).lifecycle_stage == LifecycleStage.ACTIVE
 
 
-@pytest.mark.parametrize("missing", [False, True])
-def test_repository_update_info_rejects_unmatched_runs_without_changes(store, run, missing):
-    run_id = "f" * 32 if missing else run.info.run_id
-    if not missing:
-        store.delete_run(run_id)
+def test_update_run_info_rejects_deleted_run_without_changes(store, run):
+    run_id = run.info.run_id
+    store.delete_run(run_id)
     before = _stored_run(store, run_id)
+
+    with pytest.raises(MlflowException, match="active.*Current state is deleted") as caught:
+        store.update_run_info(run_id, RunStatus.FINISHED, 2000, "$changed")
+
+    assert caught.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
+    assert _stored_run(store, run_id) == before
+
+
+def test_update_run_info_rejects_missing_run_without_inserting(store, run):
+    run_id = "f" * 32
     original_run = _stored_run(store, run.info.run_id)
 
-    with pytest.raises(RepositoryNotFoundError) as caught:
-        store._run_repository.update_info(
-            run_id=run_id, status="FINISHED", end_time=2000, run_name="changed"
-        )
+    with pytest.raises(MlflowException, match="not found") as caught:
+        store.update_run_info(run_id, RunStatus.FINISHED, 2000, "$changed")
 
-    assert caught.value.args == (run_id,)
-    assert _stored_run(store, run_id) == before
+    assert caught.value.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST)
+    assert _stored_run(store, run_id) is None
     assert _stored_run(store, run.info.run_id) == original_run

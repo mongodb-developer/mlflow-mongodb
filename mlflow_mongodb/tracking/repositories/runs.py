@@ -11,6 +11,7 @@ from pymongo.errors import DuplicateKeyError
 from mlflow_mongodb.infrastructure.array_operations import build_merge_array_expression
 from mlflow_mongodb.infrastructure.errors import (
     RepositoryAlreadyExistsError,
+    RepositoryNotActiveError,
     RepositoryNotFoundError,
 )
 from mlflow_mongodb.infrastructure.repository_operations import repository_operation
@@ -124,7 +125,7 @@ class RunRepository:
         run_name: str | None,
     ) -> RunRecord:
         # Keep the pipeline valid even when no optional fields are supplied.
-        # The filter already guarantees that this lifecycle value is unchanged.
+        # The conditional update preserves this lifecycle value.
         fields_to_update = {"lifecycle_stage": {"$literal": LifecycleStage.ACTIVE}}
         if status is not None:
             fields_to_update["status"] = {"$literal": status}
@@ -140,12 +141,24 @@ class RunRepository:
 
         with repository_operation("Unable to update run info."):
             updated = self._collection.find_one_and_update(
-                {"_id": run_id, "lifecycle_stage": LifecycleStage.ACTIVE},
-                [{"$set": fields_to_update}],
+                {"_id": run_id},
+                [
+                    {
+                        "$replaceWith": {
+                            "$cond": [
+                                {"$eq": ["$lifecycle_stage", LifecycleStage.ACTIVE]},
+                                {"$mergeObjects": ["$$ROOT", fields_to_update]},
+                                "$$ROOT",
+                            ]
+                        }
+                    }
+                ],
                 return_document=ReturnDocument.AFTER,
             )
         if updated is None:
             raise RepositoryNotFoundError(run_id)
+        if updated.get("lifecycle_stage") != LifecycleStage.ACTIVE:
+            raise RepositoryNotActiveError(run_id, updated.get("lifecycle_stage"))
         return RunRecord.from_document(updated)
 
     def _transition_lifecycle(

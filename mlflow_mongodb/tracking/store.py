@@ -362,6 +362,10 @@ class MongoDBTrackingStore(AbstractStore):
     def delete_experiment(self, experiment_id: str) -> None:
         experiment_id = self._parse_experiment_id(experiment_id)
         now = get_current_time_millis()
+        self._run_repository.mark_all_deleted(
+            experiment_id=str(experiment_id),
+            deleted_time=now,
+        )
         try:
             self._experiment_repository.mark_deleted(
                 experiment_id=experiment_id,
@@ -372,14 +376,11 @@ class MongoDBTrackingStore(AbstractStore):
             raise MlflowException(
                 f"No Experiment with id={experiment_id} exists", RESOURCE_DOES_NOT_EXIST
             ) from None
-        self._run_repository.mark_all_deleted(
-            experiment_id=str(experiment_id),
-            deleted_time=now,
-        )
 
     @handle_persistence_error("Unable to restore experiment.", logger=logger)
     def restore_experiment(self, experiment_id: str) -> None:
         experiment_id = self._parse_experiment_id(experiment_id)
+        self._run_repository.restore_all(experiment_id=str(experiment_id))
         try:
             self._experiment_repository.restore(
                 experiment_id=experiment_id,
@@ -390,8 +391,6 @@ class MongoDBTrackingStore(AbstractStore):
             raise MlflowException(
                 f"No Experiment with id={experiment_id} exists", RESOURCE_DOES_NOT_EXIST
             ) from None
-
-        self._run_repository.restore_all(experiment_id=str(experiment_id))
 
     @handle_persistence_error("Unable to rename experiment.", logger=logger)
     def rename_experiment(self, experiment_id: str, new_name: str) -> None:
@@ -628,18 +627,6 @@ class MongoDBTrackingStore(AbstractStore):
         end_time: int | None,
         run_name: str | None,
     ) -> RunInfo:
-        run = self._run_repository.find_by_id(run_id)
-        if run is None:
-            raise MlflowException(f"Run with id={run_id} not found", RESOURCE_DOES_NOT_EXIST)
-        if run.lifecycle_stage != LifecycleStage.ACTIVE:
-            raise MlflowException(
-                (
-                    f"The run {run.run_id} must be in the 'active' state. "
-                    f"Current state is {run.lifecycle_stage}."
-                ),
-                INVALID_PARAMETER_VALUE,
-            )
-
         status = RunStatus.to_string(run_status) if run_status is not None else None
         try:
             updated = self._run_repository.update_info(
@@ -652,6 +639,13 @@ class MongoDBTrackingStore(AbstractStore):
             logger.error("Unable to update run info: %s", exc)
             raise MlflowException(
                 f"Run with id={run_id} not found", RESOURCE_DOES_NOT_EXIST
+            ) from None
+        except RepositoryNotActiveError as exc:
+            logger.error("Unable to update run info: %s", exc)
+            raise MlflowException(
+                f"The run {run_id} must be in the 'active' state. "
+                f"Current state is {exc.lifecycle_stage}.",
+                INVALID_PARAMETER_VALUE,
             ) from None
 
         return RunInfo(

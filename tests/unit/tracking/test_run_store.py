@@ -20,6 +20,8 @@ from mlflow.utils.mlflow_tags import MLFLOW_RUN_NAME
 
 import mlflow_mongodb.tracking.store as tracking_store
 from mlflow_mongodb.infrastructure.errors import (
+    RepositoryNotActiveError,
+    RepositoryNotFoundError,
     RepositoryPersistenceError,
 )
 from mlflow_mongodb.tracking.store import MongoDBTrackingStore
@@ -151,18 +153,19 @@ def test_get_run_converts_params_metrics_inputs_outputs_and_tags(
     assert [(model.model_id, model.step) for model in run.outputs.model_outputs] == [("m-model", 2)]
 
 
-def test_update_run_info_checks_lifecycle_before_write(
-    run_store, run_repository, run_record_factory
-):
-    run_repository.find_by_id.return_value = run_record_factory(
-        lifecycle_stage=LifecycleStage.DELETED
+def test_update_run_info_translates_inactive_run_without_initial_read(run_store, run_repository):
+    run_repository.update_info.side_effect = RepositoryNotActiveError(
+        RUN_ID, LifecycleStage.DELETED
     )
 
     with pytest.raises(MlflowException, match="active.*Current state is deleted") as caught:
         run_store.update_run_info(RUN_ID, RunStatus.FINISHED, TIMESTAMP + 100, "renamed")
 
     assert caught.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
-    run_repository.update_info.assert_not_called()
+    run_repository.find_by_id.assert_not_called()
+    run_repository.update_info.assert_called_once_with(
+        run_id=RUN_ID, status="FINISHED", end_time=TIMESTAMP + 100, run_name="renamed"
+    )
 
 
 def test_update_run_info_converts_status_and_returned_record(
@@ -178,6 +181,7 @@ def test_update_run_info_converts_status_and_returned_record(
         run_id=RUN_ID, status="FINISHED", end_time=TIMESTAMP + 100, run_name="$renamed"
     )
     assert (info.status, info.end_time, info.run_name) == ("FINISHED", TIMESTAMP + 100, "$renamed")
+    run_repository.find_by_id.assert_not_called()
 
 
 def test_create_run_translates_parent_read_failure(run_store, experiment_repository):
@@ -229,15 +233,27 @@ def test_run_repository_is_lazy_cached_and_uses_collection_overrides(monkeypatch
     ]
 
 
-@pytest.mark.parametrize("operation", ["get_run", "update_run_info"])
-def test_missing_run_read_has_resource_not_found_code(run_store, run_repository, operation):
+def test_missing_run_read_has_resource_not_found_code(run_store, run_repository):
     run_repository.find_by_id.return_value = None
 
     with pytest.raises(MlflowException, match="not found") as caught:
-        _invoke_store(run_store, operation)
+        run_store.get_run(RUN_ID)
 
     assert caught.value.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST)
     run_repository.update_info.assert_not_called()
+
+
+def test_update_run_info_translates_missing_run_without_initial_read(run_store, run_repository):
+    run_repository.update_info.side_effect = RepositoryNotFoundError(RUN_ID)
+
+    with pytest.raises(MlflowException, match="not found") as caught:
+        run_store.update_run_info(RUN_ID, None, None, None)
+
+    assert caught.value.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST)
+    run_repository.find_by_id.assert_not_called()
+    run_repository.update_info.assert_called_once_with(
+        run_id=RUN_ID, status=None, end_time=None, run_name=None
+    )
 
 
 def test_programming_errors_pass_through_the_store_decorator(run_store, run_repository):
