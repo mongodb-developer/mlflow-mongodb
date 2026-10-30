@@ -14,11 +14,14 @@ inputs:
   replica_set:
     description: Replica set name.
     default: test-rs
+  database:
+    description: Database name to put in the connection string; the store requires one.
+    default: mlflow_ci_test
 
 outputs:
   uri:
     description: Connection string for the replica set.
-    value: mongodb://localhost:27017/?replicaSet=${{ inputs.replica_set }}
+    value: mongodb://localhost:27017/${{ inputs.database }}?replicaSet=${{ inputs.replica_set }}
 
 runs:
   using: composite
