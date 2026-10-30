@@ -7,9 +7,9 @@ on:
   # never publish or attach anything to a release.
   workflow_dispatch:
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false # never cancel a release half-way through
+# No concurrency group here: the reusable tests workflow keys its own group
+# on github.workflow, which inside a call resolves to this workflow's name,
+# so a group here would collide with it and the call would fail to start.
 
 permissions:
   contents: read
