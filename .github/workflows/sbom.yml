@@ -1,0 +1,89 @@
+name: Generate SBOM
+
+# Regenerates sbom.json (CycloneDX, the input to Silkbomb in release.yml)
+# from the package's runtime dependencies and opens a PR when it changed.
+# Runs on manual trigger or when the dependency declarations change on main.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - setup.py
+
+permissions:
+  contents: read
+
+jobs:
+  sbom:
+    name: Generate SBOM and open a PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # required to push the auto-update-sbom branch
+      pull-requests: write # required to open the pull request
+    concurrency:
+      group: sbom-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      # The package and its runtime dependencies go in one environment and
+      # the SBOM tool in another, so the tool's own dependencies don't end
+      # up in the SBOM.
+      - name: Generate SBOM
+        run: |
+          set -eu
+          python -m venv "$RUNNER_TEMP/pkg-env"
+          "$RUNNER_TEMP/pkg-env/bin/python" -m pip install --quiet .
+          "$RUNNER_TEMP/pkg-env/bin/python" -m pip uninstall --quiet --yes pip
+          python -m venv "$RUNNER_TEMP/tool-env"
+          "$RUNNER_TEMP/tool-env/bin/python" -m pip install --quiet cyclonedx-bom==7.2.1
+          "$RUNNER_TEMP/tool-env/bin/cyclonedx-py" environment \
+            --spec-version 1.5 --output-format JSON --output-file sbom.json \
+            "$RUNNER_TEMP/pkg-env/bin/python"
+          # The local package doesn't get a PURL automatically.
+          jq '(.components[] | select(.name == "mlflow-mongodb" and .purl == null))
+                |= (. + {purl: ("pkg:pypi/mlflow-mongodb@" + .version)})' \
+            sbom.json > sbom.tmp.json && mv sbom.tmp.json sbom.json
+
+      - name: Download CycloneDX CLI
+        run: |
+          curl -L -s -o "$RUNNER_TEMP/cyclonedx" \
+            https://github.com/CycloneDX/cyclonedx-cli/releases/download/v0.29.1/cyclonedx-linux-x64
+          chmod +x "$RUNNER_TEMP/cyclonedx"
+
+      - name: Validate SBOM
+        run: '"$RUNNER_TEMP/cyclonedx" validate --input-file sbom.json --fail-on-errors'
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-json
+          path: sbom.json
+          if-no-files-found: error
+
+      - name: Open a pull request
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          commit-message: "chore: update SBOM after dependency changes"
+          branch: auto-update-sbom
+          delete-branch: true
+          title: "chore: update SBOM"
+          body: |
+            Regenerated `sbom.json` from the current runtime dependencies with
+            cyclonedx-bom 7.2.1.
+
+            Triggered by ${{ github.sha }} via the
+            [SBOM workflow](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}).
+          labels: |
+            sbom
+            dependencies

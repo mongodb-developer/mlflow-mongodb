@@ -1,40 +1,240 @@
 name: Release
+
 on:
   release:
     types: [published]
-  # Manual runs are dry runs: test and build only, never publish.
+  # Manual runs are dry runs: test, build, sign, and generate the SBOM, but
+  # never publish or attach anything to a release.
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false # never cancel a release half-way through
+
+permissions:
+  contents: read
 
 jobs:
   tests:
     uses: ./.github/workflows/tests.yml
 
   build:
+    name: Build distributions
     needs: tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
-      - run: python -m pip install build twine
-      - run: python -m build
-      - run: python -m twine check --strict dist/*
-      - uses: actions/upload-artifact@v4
+
+      - name: Check the tag matches the project version
+        if: github.event_name == 'release'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version=$(python - <<'EOF'
+          import pathlib, re
+          print(re.search(r'version="([^"]+)"', pathlib.Path("setup.py").read_text()).group(1))
+          EOF
+          )
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::Tag $TAG doesn't match project version $version"
+            exit 1
+          fi
+
+      - name: Build
+        run: |
+          python -m pip install build
+          python -m build
+
+      - name: Check distributions
+        run: |
+          python -m pip install twine
+          python -m twine check --strict dist/*
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  test-wheel:
+    name: Test the built wheel
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No pip cache, so a dependency missing from the package metadata can't
+      # be masked by one left over from an earlier run.
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+
+      - name: Start MongoDB 8.0 replica set
+        id: mongodb
+        uses: ./.github/actions/start-mongodb
+
+      - name: Download distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: dist
           path: dist/
 
-  publish:
+      - name: Remove the source so only the wheel can be imported
+        run: rm -r mlflow_mongodb
+
+      - name: Install the wheel with its dev extras
+        run: |
+          set -eu
+          wheel=$(ls dist/*.whl)
+          python -m pip install "${wheel}[dev]"
+
+      - name: Import the wheel in a fresh interpreter
+        run: python -I -c "import mlflow_mongodb"
+
+      - name: Run the tests against the wheel
+        env:
+          MONGODB_URI: ${{ steps.mongodb.outputs.uri }}
+        run: python -m pytest tests/unit tests/functional
+
+  sign:
+    name: Sign distributions
     needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release-signing
+    permissions:
+      id-token: write # required to assume the AWS signing role
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
+
+      - name: Set up signing credentials
+        uses: mongodb-labs/drivers-github-tools/setup@99b1cbd729bc83bf7fc74e1b2a97fffad3d65d7b # v3.1.1
+        with:
+          aws_role_arn: ${{ secrets.AWS_ROLE_ARN }}
+          aws_region_name: ${{ vars.AWS_REGION_NAME }}
+          aws_secret_id: ${{ secrets.AWS_SECRET_ID }}
+
+      - name: Sign distributions with Garasign
+        uses: mongodb-labs/drivers-github-tools/gpg-sign@99b1cbd729bc83bf7fc74e1b2a97fffad3d65d7b # v3.1.1
+        with:
+          filenames: dist/*
+
+      - name: Upload signatures
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist-signatures
+          path: ${{ env.RELEASE_ASSETS }}/*.sig
+          if-no-files-found: error
+
+  sbom:
+    name: Generate the augmented SBOM
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release-signing
+    permissions:
+      id-token: write # required to assume the AWS role that holds the Kondukto token
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Kondukto credentials
+        uses: mongodb-labs/drivers-github-tools/setup@99b1cbd729bc83bf7fc74e1b2a97fffad3d65d7b # v3.1.1
+        with:
+          aws_role_arn: ${{ secrets.AWS_ROLE_ARN }}
+          aws_region_name: ${{ vars.AWS_REGION_NAME }}
+          aws_secret_id: ${{ secrets.AWS_SECRET_ID }}
+
+      # Runs Silkbomb: refreshes sbom.json, augments it with vulnerability
+      # data, and uploads the result to Kondukto under this ref's branch.
+      - name: Augment the SBOM with Silkbomb
+        uses: mongodb-labs/drivers-github-tools/sbom@99b1cbd729bc83bf7fc74e1b2a97fffad3d65d7b # v3.1.1
+        with:
+          sbom_in_path: sbom.json
+
+      - name: Upload augmented SBOM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom
+          path: ${{ env.RELEASE_ASSETS }}/cyclonedx.sbom.json
+          if-no-files-found: error
+
+  publish:
+    name: Publish to PyPI
+    needs: [build, test-wheel, sign, sbom]
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     environment: pypi
     permissions:
       id-token: write # required for trusted publishing
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: dist
           path: dist/
-      - uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+
+  attach-release-assets:
+    name: Attach signatures and SBOM to the release
+    needs: [sign, sbom, publish]
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write # required to upload release assets
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
+
+      - name: Download signatures
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist-signatures
+          path: dist/
+
+      - name: Download augmented SBOM
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sbom
+          path: dist/
+
+      - name: Checksum the release assets
+        run: (cd dist && sha256sum -- *.whl *.tar.gz *.sig cyclonedx.sbom.json > SHA256SUMS)
+
+      - name: Upload distributions, signatures, SBOM, and checksums to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }} # no checkout here, so gh can't infer it
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        # --clobber lets a rerun replace assets left by a partially failed upload.
+        run: >-
+          gh release upload --clobber "$RELEASE_TAG"
+          dist/*.whl dist/*.tar.gz dist/*.sig dist/cyclonedx.sbom.json dist/SHA256SUMS
