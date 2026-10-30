@@ -1,6 +1,8 @@
 """Skeleton of the MongoDB tracking store for the agreed V1 scope."""
 
 import logging
+import math
+import sys
 from functools import cached_property
 from uuid import uuid4
 
@@ -792,6 +794,13 @@ class MongoDBTrackingStore(AbstractStore):
             run_name=updated.name,
         )
 
+    @staticmethod
+    def _sanitize_metric_value(value: float) -> float:
+        # BSON preserves NaN directly; SQLAlchemyStore needs a separate flag.
+        if math.isinf(value):
+            return math.copysign(sys.float_info.max, value)
+        return value
+
     @handle_persistence_error("Unable to log run batch.", logger=logger)
     def log_batch(
         self, run_id: str, metrics: list[Metric], params: list[Param], tags: list[RunTag]
@@ -807,7 +816,7 @@ class MongoDBTrackingStore(AbstractStore):
                 metrics=[
                     {
                         "k": metric.key,
-                        "v": metric.value,
+                        "v": self._sanitize_metric_value(metric.value),
                         "timestamp": metric.timestamp,
                         "step": metric.step,
                         "model_id": metric.model_id,

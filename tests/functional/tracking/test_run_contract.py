@@ -1,6 +1,7 @@
 """Run persistence contracts against MongoDB."""
 
 import math
+import sys
 from unittest.mock import patch
 from uuid import UUID
 
@@ -154,23 +155,41 @@ def test_metric_history_pagination_is_scoped_and_preserves_model_dataset_identit
     assert store.get_metric_history(run_id, "absent") == []
 
 
-def test_nonfinite_metric_values_are_preserved_in_history(store, run):
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (float("inf"), sys.float_info.max),
+        (float("-inf"), -sys.float_info.max),
+        (0.4, 0.4),
+        (-2.0, -2.0),
+        (0.0, 0.0),
+        (sys.float_info.max, sys.float_info.max),
+        (-sys.float_info.max, -sys.float_info.max),
+    ],
+)
+def test_metric_value_sanitization_applies_to_history_and_latest(store, run, value, expected):
     store.log_batch(
         run.info.run_id,
-        [
-            Metric("value", float("nan"), 1000, 0),
-            Metric("value", float("inf"), 1001, 1),
-            Metric("value", float("-inf"), 1002, 2),
-        ],
+        [Metric("value", value, 1000, 0)],
         [],
         [],
     )
 
     history = store.get_metric_history(run.info.run_id, "value")
 
+    assert len(history) == 1
+    assert history[0].value == pytest.approx(expected)
+    assert store.get_run(run.info.run_id).data.metrics["value"] == pytest.approx(expected)
+
+
+def test_nan_is_preserved_in_metric_history_and_latest(store, run):
+    store.log_batch(run.info.run_id, [Metric("value", float("nan"), 1000, 0)], [], [])
+
+    history = store.get_metric_history(run.info.run_id, "value")
+
+    assert len(history) == 1
     assert math.isnan(history[0].value)
-    assert history[1].value == float("inf")
-    assert history[2].value == float("-inf")
+    assert math.isnan(store.get_run(run.info.run_id).data.metrics["value"])
 
 
 def test_nan_ranks_as_zero_for_latest_metric_value_ties(store, run):
