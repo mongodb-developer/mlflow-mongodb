@@ -4,7 +4,7 @@ from collections.abc import Mapping
 
 from mlflow.entities import LifecycleStage
 from mlflow.utils.mlflow_tags import MLFLOW_RUN_NAME
-from pymongo import ASCENDING, ReturnDocument
+from pymongo import ASCENDING, ReturnDocument, UpdateOne
 from pymongo.database import Database
 from pymongo.errors import DuplicateKeyError
 
@@ -24,6 +24,13 @@ class RunRepository:
     """Store run documents with small run fields embedded in the document."""
 
     EXPERIMENT_INDEX = "runs_experiment_id"
+    _METRIC_IDENTITY_FIELDS = (
+        "run_id",
+        "k",
+        "timestamp",
+        "step",
+        "v",
+    )
 
     def __init__(self, database: Database, settings: MongoDBSettings | None = None):
         self._settings = settings or MongoDBSettings()
@@ -36,6 +43,11 @@ class RunRepository:
             self._metrics_collection.create_index(
                 [("run_id", ASCENDING), ("k", ASCENDING), ("timestamp", ASCENDING)],
                 name="run_metrics_run_k_timestamp",
+            )
+            self._metrics_collection.create_index(
+                [(field, ASCENDING) for field in self._METRIC_IDENTITY_FIELDS],
+                name="run_metrics_identity",
+                unique=True,
             )
 
     def create(
@@ -257,8 +269,16 @@ class RunRepository:
 
         if metrics:
             metric_documents = [{**metric, "run_id": run_id} for metric in metrics]
+            operations = [
+                UpdateOne(
+                    {field: document.get(field) for field in self._METRIC_IDENTITY_FIELDS},
+                    {"$setOnInsert": document},
+                    upsert=True,
+                )
+                for document in metric_documents
+            ]
             with repository_operation("Unable to insert run batch metrics."):
-                self._metrics_collection.insert_many(metric_documents, ordered=True)
+                self._metrics_collection.bulk_write(operations, ordered=True)
 
     def log_inputs(self, *, run_id: str, datasets: list[dict], models: list[dict]) -> None:
         """Attach dataset and model inputs with one atomic database operation."""

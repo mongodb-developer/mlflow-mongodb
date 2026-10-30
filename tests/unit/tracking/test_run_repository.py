@@ -64,10 +64,26 @@ def test_initialization_selects_configured_collections_and_creates_indexes():
     runs.create_index.assert_called_once_with(
         [("experiment_id", ASCENDING)], name=RunRepository.EXPERIMENT_INDEX
     )
-    metrics.create_index.assert_called_once_with(
-        [("run_id", ASCENDING), ("k", ASCENDING), ("timestamp", ASCENDING)],
-        name="run_metrics_run_k_timestamp",
-    )
+    assert metrics.create_index.call_args_list == [
+        call(
+            [("run_id", ASCENDING), ("k", ASCENDING), ("timestamp", ASCENDING)],
+            name="run_metrics_run_k_timestamp",
+        ),
+        call(
+            [
+                (field, ASCENDING)
+                for field in (
+                    "run_id",
+                    "k",
+                    "timestamp",
+                    "step",
+                    "v",
+                )
+            ],
+            name="run_metrics_identity",
+            unique=True,
+        ),
+    ]
 
 
 @pytest.mark.parametrize("step", ["runs", "runs_index", "run_metrics", "metrics_index"])
@@ -330,16 +346,16 @@ def test_batch_update_failure_prevents_metric_insertion(repository, collections,
     assert str(caught.value) == "Unable to update run batch data."
     assert caught.value.__cause__ is backend_error
     collections["runs"].find_one.assert_not_called()
-    collections["run_metrics"].insert_many.assert_not_called()
+    collections["run_metrics"].bulk_write.assert_not_called()
 
 
 @pytest.mark.parametrize("error_type", [OperationFailure, InvalidDocument])
 def test_batch_metric_insertion_failure_follows_run_update(repository, collections, error_type):
     backend_error = error_type("Private metric insertion details")
-    collections["run_metrics"].insert_many.side_effect = backend_error
+    collections["run_metrics"].bulk_write.side_effect = backend_error
     operations = Mock()
     operations.attach_mock(collections["runs"].find_one_and_update, "update")
-    operations.attach_mock(collections["run_metrics"].insert_many, "insert")
+    operations.attach_mock(collections["run_metrics"].bulk_write, "insert")
 
     with pytest.raises(RepositoryPersistenceError) as caught:
         repository.log_batch(
