@@ -307,7 +307,7 @@ def test_span_redelivery_does_not_replace_first_stored_payload(
     assert records[0].end_time_ns == first["end_time_ns"]
 
 
-def test_summary_update_merges_missing_keys_and_respects_authoritative_metadata(
+def test_summary_update_replaces_tags_and_respects_authoritative_metadata(
     repository, start_trace_arguments
 ):
     record = repository.start_trace(
@@ -343,7 +343,10 @@ def test_summary_update_merges_missing_keys_and_respects_authoritative_metadata(
     assert updated.execution_duration == 10
     assert updated.request_preview == "explicit"
     assert updated.response_preview == "$response"
-    assert {item.key: item.value for item in updated.tags} == {"team.name": "$risk", "new": "$tag"}
+    assert {item.key: item.value for item in updated.tags} == {
+        "team.name": "derived",
+        "new": "$tag",
+    }
     assert {item.key: item.value for item in updated.trace_metadata} == {
         "source": "$run",
         "session": "$session",

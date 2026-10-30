@@ -1306,10 +1306,10 @@ class MongoDBTrackingStore(AbstractStore):
             raise MlflowException.invalid_parameter_value("location must be an experiment ID.")
 
         self._validate_span_ingestion_experiment(location)
-        documents, documents_by_trace = self._prepare_span_documents(spans)
+        documents, documents_by_trace, batch_tags = self._prepare_span_documents(spans)
         self._ensure_span_traces(location, documents_by_trace)
         self._persist_span_documents(documents)
-        self._refresh_span_summaries(location, documents_by_trace)
+        self._refresh_span_summaries(location, documents_by_trace, batch_tags)
         return spans
 
     def _validate_span_ingestion_experiment(self, experiment_id: str) -> None:
@@ -1341,10 +1341,11 @@ class MongoDBTrackingStore(AbstractStore):
         self,
         experiment_id: str,
         documents_by_trace: defaultdict[str, list[dict[str, Any]]],
+        batch_tags: dict[str, dict[str, str]],
     ) -> None:
         try:
             for trace_id in documents_by_trace:
-                self._refresh_trace_span_summary(trace_id, experiment_id)
+                self._refresh_trace_span_summary(trace_id, experiment_id, batch_tags[trace_id])
         except RepositoryNotFoundError as exc:
             logger.error("Unable to refresh trace span summaries: %s", exc)
             raise MlflowException(
@@ -1408,18 +1409,23 @@ class MongoDBTrackingStore(AbstractStore):
             return None
 
     @classmethod
-    def _span_to_document(cls, span: Span) -> dict[str, Any]:
-        """Keep full span content plus compact native fields for summary queries."""
-
-        content = translate_span_when_storing(span)
-        attributes = content.get("attributes", {})
-        root = span.parent_id is None
+    def _span_resource_tags(cls, span: Span) -> dict[str, str]:
         resource_tags = {}
         resource = getattr(span._span, "resource", None)
         if resource is not None:
             for key, value in resource.attributes.items():
                 if not key.startswith(("telemetry.sdk.", "mlflow.")):
                     cls._add_span_trace_tag(resource_tags, key, value)
+        return resource_tags
+
+    @classmethod
+    def _span_to_document(cls, span: Span) -> dict[str, Any]:
+        """Keep full span content plus compact native fields for summary queries."""
+
+        content = translate_span_when_storing(span)
+        attributes = content.get("attributes", {})
+        root = span.parent_id is None
+        resource_tags = cls._span_resource_tags(span)
         root_tags = {}
         if root:
             for key, value in attributes.items():
@@ -1487,14 +1493,9 @@ class MongoDBTrackingStore(AbstractStore):
         end_times = [d.end_time_ns for d in documents if d.end_time_ns is not None]
         root = next((d for d in documents if d.parent_span_id is None), None)
         metadata = {}
-        tags = {}
         for document in documents:
             for key, value in document.trace_fields["metadata"].items():
                 metadata.setdefault(key, value)
-            for key, value in document.trace_fields["resource_tags"].items():
-                tags.setdefault(key, value)
-        if root:
-            tags.update(root.trace_fields["root_tags"])
 
         if not root:
             state = TraceState.IN_PROGRESS.value
@@ -1510,7 +1511,6 @@ class MongoDBTrackingStore(AbstractStore):
             "state": state,
             "request_preview": root.trace_fields["request_preview"] if root else None,
             "response_preview": root.trace_fields["response_preview"] if root else None,
-            "tags": tags,
             "metadata": metadata,
             "token_usage": token_usage,
             "cost": cost,
@@ -1520,22 +1520,41 @@ class MongoDBTrackingStore(AbstractStore):
     def _prepare_span_documents(
         cls,
         spans: list[Span],
-    ) -> tuple[list[dict[str, Any]], defaultdict[str, list[dict[str, Any]]]]:
+    ) -> tuple[
+        list[dict[str, Any]],
+        defaultdict[str, list[dict[str, Any]]],
+        dict[str, dict[str, str]],
+    ]:
         # First delivery wins, including repeated identities in the same batch.
         # Prepare documents before creating placeholders; the driver validates BSON on write.
         documents_by_identity = {}
+        resource_tags = {}
+        root_tags = defaultdict(dict)
         for span in spans:
             identity = (span.trace_id, span.span_id)
             if identity not in documents_by_identity:
                 documents_by_identity[identity] = cls._span_to_document(span)
+            document = documents_by_identity[identity]
+            resource = getattr(span._span, "resource", None)
+            # Use the first nonempty resource in this batch, then apply root
+            # tags after it, regardless of span order.
+            if span.trace_id not in resource_tags and resource is not None and resource.attributes:
+                resource_tags[span.trace_id] = cls._span_resource_tags(span)
+            root_tags[span.trace_id].update(document["trace_fields"]["root_tags"])
 
         documents_by_trace = defaultdict(list)
         for document in documents_by_identity.values():
             documents_by_trace[document["trace_id"]].append(document)
-        return list(documents_by_identity.values()), documents_by_trace
+        batch_tags = {
+            trace_id: {**resource_tags.get(trace_id, {}), **root_tags[trace_id]}
+            for trace_id in documents_by_trace
+        }
+        return list(documents_by_identity.values()), documents_by_trace, batch_tags
 
     @retry_on_exception(RepositoryWriteConflictError, attempts=3, backoff_seconds=(0.01, 0.05))
-    def _refresh_trace_span_summary(self, trace_id: str, experiment_id: str) -> None:
+    def _refresh_trace_span_summary(
+        self, trace_id: str, experiment_id: str, batch_tags: dict[str, str]
+    ) -> None:
         revision, documents = self._trace_repository.span_summary_snapshot(
             trace_id=trace_id, experiment_id=experiment_id
         )
@@ -1544,6 +1563,7 @@ class MongoDBTrackingStore(AbstractStore):
             # snapshot or invent a successful write while deletion is in progress.
             raise RepositoryNotFoundError(trace_id)
         summary = self._summarize_spans(documents)
+        summary["tags"] = batch_tags
         # MLflow's trace_metadata contract requires strings. The corresponding
         # native fields are stored in the same atomic update for MongoDB queries.
         summary["aggregate_metadata"] = {

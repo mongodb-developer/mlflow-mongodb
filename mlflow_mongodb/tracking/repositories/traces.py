@@ -413,8 +413,11 @@ class TraceRepository:
                     "$state",
                 ]
             },
-            # Existing tags/metadata include start_trace and explicit tag writes.
-            "tags": self._merge_missing_records("$tags", summary["tags"]),
+            # Span-derived tags replace existing values; root tags already take
+            # precedence over resource tags in the summary.
+            "tags": build_merge_array_expression(
+                "$tags", [{"k": key, "v": value} for key, value in summary["tags"].items()], "k"
+            ),
             "trace_metadata": self._merge_missing_records("$trace_metadata", summary["metadata"]),
         }
         for key in ("request_time", "execution_duration"):

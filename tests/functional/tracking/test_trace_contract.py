@@ -207,6 +207,47 @@ def test_concurrent_metadata_and_span_ingestion_preserve_one_complete_trace(
             assert document["trace_info_finalized"] is True
 
 
+@pytest.mark.parametrize(
+    "first_span,second_span,first_value,second_value",
+    [
+        ("child", "root", "$resource", "$root"),
+        ("root", "child", "$root", "$resource"),
+    ],
+)
+def test_span_tag_updates_use_only_the_incoming_batch_and_preserve_unrelated_tags(
+    store, trace_info_factory, span_factory, first_span, second_span, first_value, second_value
+):
+    info = store.start_trace(
+        trace_info_factory(tags={"team.name": "explicit", "unrelated": "$keep"})
+    )
+    spans = {
+        "root": span_factory(
+            trace_id=info.trace_id,
+            attributes={SPAN_TRACE_TAG_PREFIX + "team.name": "$root"},
+            resource_attributes={"team.name": "root-resource"},
+        ),
+        "child": span_factory(
+            trace_id=info.trace_id,
+            span_id=2,
+            parent_id=1,
+            resource_attributes={"team.name": "$resource"},
+        ),
+    }
+
+    store.log_spans(info.experiment_id, [spans[first_span]])
+    first_tags = store.get_trace_info(info.trace_id).tags
+    assert first_tags["team.name"] == first_value
+    assert first_tags["unrelated"] == "$keep"
+
+    store.log_spans(info.experiment_id, [spans[second_span]])
+    final_tags = store.get_trace_info(info.trace_id).tags
+    assert final_tags["team.name"] == second_value
+    assert final_tags["unrelated"] == "$keep"
+    document = store._trace_repository._collection.find_one({"_id": info.trace_id})
+    matching_tags = [tag for tag in document["tags"] if tag["k"] == "team.name"]
+    assert matching_tags == [{"k": "team.name", "v": second_value}]
+
+
 def test_span_summary_preserves_authoritative_trace_fields(store, trace_info_factory, span_factory):
     info = trace_info_factory(
         request_time=1000,
@@ -237,7 +278,7 @@ def test_span_summary_preserves_authoritative_trace_fields(store, trace_info_fac
     assert loaded.request_time == 1000
     assert loaded.execution_duration == 77
     assert loaded.request_preview == "explicit"
-    assert loaded.tags["team"] == "explicit"
+    assert loaded.tags["team"] == "derived"
     assert loaded.tags["new"] == "$value"
     assert loaded.trace_metadata[TraceMetadataKey.TOKEN_USAGE] == '{"input_tokens": 20}'
     assert loaded.trace_metadata[TRACE_COST_METADATA] == '{"total_cost": 0.5}'

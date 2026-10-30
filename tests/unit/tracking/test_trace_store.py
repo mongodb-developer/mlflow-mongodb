@@ -383,7 +383,7 @@ def test_log_spans_deduplicates_before_writing_and_refreshes_each_trace(
     documents = trace_repository.log_spans.call_args.args[0]
     assert len(documents) == 3
     assert documents[0]["start_time_ns"] == first.start_time_ns
-    assert refresh.call_args_list == [call(TRACE_ID, "42"), call("other", "42")]
+    assert refresh.call_args_list == [call(TRACE_ID, "42", {}), call("other", "42", {})]
     assert [entry[0] for entry in trace_repository.method_calls] == ["ensure_traces", "log_spans"]
 
 
@@ -522,20 +522,33 @@ def test_summary_uses_root_state_and_persisted_time_bounds(span_factory, parent_
     assert summary["execution_duration"] == 10
 
 
-def test_summary_root_tags_override_resource_tags(span_factory):
+def test_batch_root_tags_override_first_resource_tags(span_factory):
     root = span_factory(
         attributes={SPAN_TRACE_TAG_PREFIX + "team": "root"},
         resource_attributes={"team": "resource"},
     )
     child = span_factory(span_id=2, parent_id=1, resource_attributes={"other": "value"})
-    records = [
-        SpanSummaryRecord.from_document(MongoDBTrackingStore._span_to_document(span))
-        for span in (root, child)
-    ]
-    assert MongoDBTrackingStore._summarize_spans(records)["tags"] == {
-        "team": "root",
-        "other": "value",
-    }
+    _, _, batch_tags = MongoDBTrackingStore._prepare_span_documents([root, child])
+    assert batch_tags[root.trace_id] == {"team": "root"}
+
+
+def test_duplicate_span_uses_selected_resource_tags_and_preserves_first_document(span_factory):
+    first = span_factory(parent_id=9, start_time=1_000_000)
+    duplicate = span_factory(
+        parent_id=9,
+        start_time=2_000_000,
+        resource_attributes={"team.name": "$risk"},
+    )
+
+    documents, documents_by_trace, batch_tags = MongoDBTrackingStore._prepare_span_documents(
+        [first, duplicate]
+    )
+
+    assert len(documents) == 1
+    assert documents[0]["start_time_ns"] == first.start_time_ns
+    assert documents[0]["trace_fields"]["resource_tags"] == {}
+    assert documents_by_trace[first.trace_id] == documents
+    assert batch_tags[first.trace_id] == {"team.name": "$risk"}
 
 
 def test_summary_does_not_count_usage_twice_when_parent_arrives_later(span_factory):
@@ -580,7 +593,7 @@ def test_refresh_retries_with_new_snapshot_after_revision_conflict(
         None,
     ]
 
-    trace_store._refresh_trace_span_summary(TRACE_ID, "42")
+    trace_store._refresh_trace_span_summary(TRACE_ID, "42", {})
 
     assert trace_repository.span_summary_snapshot.call_count == 2
     updates = trace_repository.update_span_summary.call_args_list
@@ -596,7 +609,7 @@ def test_refresh_retries_with_new_snapshot_after_revision_conflict(
 def test_refresh_empty_snapshot_does_not_finalize_trace(trace_store, trace_repository):
     trace_repository.span_summary_snapshot.return_value = (1, [])
     with pytest.raises(RepositoryNotFoundError):
-        trace_store._refresh_trace_span_summary(TRACE_ID, "42")
+        trace_store._refresh_trace_span_summary(TRACE_ID, "42", {})
     trace_repository.update_span_summary.assert_not_called()
 
 
