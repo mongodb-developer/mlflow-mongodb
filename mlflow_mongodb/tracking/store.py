@@ -1,5 +1,6 @@
 """Skeleton of the MongoDB tracking store for the agreed V1 scope."""
 
+import json
 import logging
 import math
 import sys
@@ -45,7 +46,7 @@ from mlflow.store.tracking import (
 )
 from mlflow.store.tracking.abstract_store import AbstractStore
 from mlflow.tracking.default_experiment import DEFAULT_EXPERIMENT_ID
-from mlflow.utils.mlflow_tags import MLFLOW_RUN_NAME, _get_run_name_from_tags
+from mlflow.utils.mlflow_tags import MLFLOW_LOGGED_MODELS, MLFLOW_RUN_NAME, _get_run_name_from_tags
 from mlflow.utils.name_utils import _generate_random_name
 from mlflow.utils.search_utils import (
     SearchExperimentsUtils,
@@ -65,6 +66,7 @@ from mlflow.utils.validation import (
     _validate_metric_name,
     _validate_param_keys_unique,
     _validate_run_id,
+    _validate_tag,
 )
 from pymongo import MongoClient
 from pymongo.database import Database
@@ -1074,6 +1076,45 @@ class MongoDBTrackingStore(AbstractStore):
         metrics = self._logged_model_repository.get_metric_history(record.model_id)
 
         return self._to_logged_model(record, metrics)
+
+    @handle_persistence_error("Unable to finalize logged model.", logger=logger)
+    def finalize_logged_model(self, model_id: str, status: LoggedModelStatus) -> LoggedModel:
+        try:
+            record = self._logged_model_repository.finalize(
+                model_id=model_id,
+                status=status.value,
+                last_updated_timestamp=get_current_time_millis(),
+            )
+        except RepositoryNotFoundError as exc:
+            logger.error("Unable to finalize logged model: %s", exc)
+            raise MlflowException(
+                f"Logged model with ID '{model_id}' not found.", RESOURCE_DOES_NOT_EXIST
+            ) from None
+        metrics = self._logged_model_repository.get_metric_history(model_id)
+        return self._to_logged_model(record, metrics)
+
+    @handle_persistence_error("Unable to record logged model.", logger=logger)
+    def record_logged_model(self, run_id, mlflow_model):
+        # Import lazily to avoid a circular import during MLflow plugin registration.
+        from mlflow.models import Model  # ruff: ignore[import-outside-top-level]
+
+        if not isinstance(mlflow_model, Model):
+            raise TypeError(
+                f"Argument 'mlflow_model' should be mlflow.models.Model, got '{type(mlflow_model)}'"
+            )
+        model_dict = mlflow_model.get_tags_dict()
+        run = self.get_run(run_id)
+        if run.info.lifecycle_stage != LifecycleStage.ACTIVE:
+            raise MlflowException(
+                f"The run {run_id} must be in the 'active' state. "
+                f"Current state is {run.info.lifecycle_stage}.",
+                INVALID_PARAMETER_VALUE,
+            )
+        previous = run.data.tags.get(MLFLOW_LOGGED_MODELS)
+        history = json.loads(previous) if previous is not None else []
+        value = json.dumps([*history, model_dict])
+        _validate_tag(MLFLOW_LOGGED_MODELS, value)
+        self.log_batch(run_id, metrics=[], params=[], tags=[RunTag(MLFLOW_LOGGED_MODELS, value)])
 
     @handle_persistence_error("Unable to delete logged model.", logger=logger)
     def delete_logged_model(self, model_id: str) -> None:

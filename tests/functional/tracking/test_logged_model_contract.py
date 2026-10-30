@@ -1,20 +1,24 @@
 """Logged-model persistence contracts against MongoDB."""
 
+import json
+import sys
 from unittest.mock import patch
 from uuid import UUID
 
 import pytest
-from mlflow.entities import LifecycleStage, Metric
+from mlflow.entities import LifecycleStage, Metric, RunTag
 from mlflow.entities.logged_model_parameter import LoggedModelParameter
 from mlflow.entities.logged_model_status import LoggedModelStatus
 from mlflow.entities.logged_model_tag import LoggedModelTag
 from mlflow.exceptions import MlflowException
+from mlflow.models import Model
 from mlflow.protos.databricks_pb2 import (
     BAD_REQUEST,
     INVALID_PARAMETER_VALUE,
     RESOURCE_DOES_NOT_EXIST,
     ErrorCode,
 )
+from mlflow.utils.mlflow_tags import MLFLOW_LOGGED_MODELS
 
 from mlflow_mongodb.infrastructure.errors import RepositoryNotFoundError, RepositoryTagNotFoundError
 
@@ -23,6 +27,92 @@ def _stored_model(store, model_id):
     return store._database[store._settings.logged_models_collection_name].find_one(
         {"_id": model_id}
     )
+
+
+def test_get_logged_model_dedupes_and_sanitizes_metrics(store, run):
+    model = store.create_logged_model(run.info.experiment_id, name="retried-metric")
+    metric = Metric("loss", float("inf"), 1000, 1, model_id=model.model_id)
+    store.log_batch(run.info.run_id, metrics=[metric, metric], params=[], tags=[])
+    store.log_batch(run.info.run_id, metrics=[metric], params=[], tags=[])
+
+    metrics = store.get_logged_model(model.model_id).metrics
+
+    assert len(metrics) == 1
+    assert metrics[0].key == "loss"
+    assert metrics[0].value == pytest.approx(sys.float_info.max)
+    assert metrics[0].timestamp == 1000
+    assert metrics[0].step == 1
+    assert metrics[0].model_id == model.model_id
+    assert metrics[0].run_id == run.info.run_id
+
+
+@pytest.mark.parametrize("status", [LoggedModelStatus.READY, LoggedModelStatus.FAILED])
+@pytest.mark.parametrize("deleted", [False, True])
+def test_finalize_preserves_model_data_and_returns_metric_history(
+    store, run, clock, status, deleted
+):
+    model = store.create_logged_model(
+        run.info.experiment_id,
+        name="finalized",
+        tags=[LoggedModelTag("team", "risk")],
+        params=[LoggedModelParameter("depth", "3")],
+    )
+    store.log_metric(run.info.run_id, Metric("loss", 0.4, 1000, 1, model_id=model.model_id))
+    if deleted:
+        store.delete_logged_model(model.model_id)
+    before = _stored_model(store, model.model_id)
+    clock["now"] += 1000
+
+    finalized = store.finalize_logged_model(model.model_id, status)
+    repeated = store.finalize_logged_model(model.model_id, status)
+
+    assert finalized.status == repeated.status == status
+    assert finalized.last_updated_timestamp == clock["now"]
+    assert finalized.tags == {"team": "risk"}
+    assert finalized.params == {"depth": "3"}
+    assert len(finalized.metrics) == 1
+    assert finalized.metrics[0].value == pytest.approx(0.4)
+    assert finalized.metrics[0].model_id == model.model_id
+    assert _stored_model(store, model.model_id) == {
+        **before,
+        "status": status.value,
+        "last_updated_timestamp": clock["now"],
+    }
+
+
+def test_finalize_missing_model_does_not_insert(store):
+    model_id = "m-" + "f" * 32
+    with pytest.raises(MlflowException) as caught:
+        store.finalize_logged_model(model_id, LoggedModelStatus.READY)
+    assert caught.value.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST)
+    assert _stored_model(store, model_id) is None
+
+
+def test_record_logged_model_appends_history_and_preserves_other_tags(store, run):
+    models = [Model(artifact_path="first"), Model(artifact_path="second")]
+    store.set_tag(run.info.run_id, RunTag("keep", "$value"))
+    for model in models:
+        store.record_logged_model(run.info.run_id, model)
+
+    loaded = store.get_run(run.info.run_id)
+    expected = [model.get_tags_dict() for model in models]
+    assert json.loads(loaded.data.tags[MLFLOW_LOGGED_MODELS]) == expected
+    assert loaded.data.tags["keep"] == "$value"
+    document = store._database[store._settings.runs_collection_name].find_one(
+        {"_id": run.info.run_id}
+    )
+    stored_tags = {tag["k"]: tag["v"] for tag in document["tags"]}
+    assert json.loads(stored_tags[MLFLOW_LOGGED_MODELS]) == expected
+
+
+def test_record_logged_model_rejects_deleted_run_without_changing_it(store, run):
+    store.delete_run(run.info.run_id)
+    collection = store._database[store._settings.runs_collection_name]
+    before = collection.find_one({"_id": run.info.run_id})
+    with pytest.raises(MlflowException) as caught:
+        store.record_logged_model(run.info.run_id, Model(artifact_path="model"))
+    assert caught.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
+    assert collection.find_one({"_id": run.info.run_id}) == before
 
 
 def test_create_get_preserve_metadata_and_k_v_arrays(store, run, clock):

@@ -9,6 +9,7 @@ from mlflow.entities.logged_model_parameter import LoggedModelParameter
 from mlflow.entities.logged_model_status import LoggedModelStatus
 from mlflow.entities.logged_model_tag import LoggedModelTag
 from mlflow.exceptions import MlflowException
+from mlflow.models import Model
 from mlflow.protos.databricks_pb2 import (
     BAD_REQUEST,
     INVALID_PARAMETER_VALUE,
@@ -19,12 +20,75 @@ from mlflow.protos.databricks_pb2 import (
 import mlflow_mongodb.tracking.store as tracking_store
 from mlflow_mongodb.infrastructure.errors import (
     RepositoryNotFoundError,
+    RepositoryPersistenceError,
     RepositoryTagNotFoundError,
 )
 from mlflow_mongodb.tracking.types import RunMetricRecord
 
 MODEL_ID = f"m-{UUID(int=42).hex}"
 TIMESTAMP = 1_700_000_000_000
+
+
+def test_finalize_translates_missing_model(logged_model_store, logged_model_repository):
+    logged_model_repository.finalize.side_effect = RepositoryNotFoundError("private")
+    with pytest.raises(MlflowException) as caught:
+        logged_model_store.finalize_logged_model(MODEL_ID, LoggedModelStatus.READY)
+    assert caught.value.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST)
+    assert "private" not in caught.value.message
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__
+    logged_model_repository.get_metric_history.assert_not_called()
+
+
+def test_finalize_hides_persistence_details(logged_model_store, logged_model_repository, caplog):
+    failure = RepositoryPersistenceError("private")
+    logged_model_repository.finalize.side_effect = failure
+    with pytest.raises(MlflowException) as caught:
+        logged_model_store.finalize_logged_model(MODEL_ID, LoggedModelStatus.READY)
+    assert caught.value.error_code == "INTERNAL_ERROR"
+    assert caught.value.message == "Unable to finalize logged model."
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__
+    assert caplog.records[-1].args == (failure,)
+    logged_model_repository.get_metric_history.assert_not_called()
+
+
+@pytest.mark.parametrize("value", [None, {}, "model"])
+def test_record_rejects_wrong_model_type_before_reading_run(run_store, run_repository, value):
+    with pytest.raises(TypeError, match="should be mlflow.models.Model"):
+        run_store.record_logged_model("missing", value)
+    run_repository.find_by_id.assert_not_called()
+    run_repository.log_batch.assert_not_called()
+
+
+def test_record_validates_history_tag_before_writing(run_store, run_repository, monkeypatch):
+    validate = Mock(side_effect=MlflowException.invalid_parameter_value("Invalid tag value"))
+    monkeypatch.setattr(tracking_store, "_validate_tag", validate)
+    with pytest.raises(MlflowException) as caught:
+        run_store.record_logged_model(UUID(int=42).hex, Model(artifact_path="model"))
+    assert caught.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
+    validate.assert_called_once()
+    run_repository.log_batch.assert_not_called()
+
+
+def test_record_missing_run_prevents_write(run_store, run_repository):
+    run_repository.find_by_id.return_value = None
+    with pytest.raises(MlflowException) as caught:
+        run_store.record_logged_model("missing", Model(artifact_path="model"))
+    assert caught.value.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST)
+    run_repository.log_batch.assert_not_called()
+
+
+def test_record_hides_write_failure(run_store, run_repository, caplog):
+    failure = RepositoryPersistenceError("private")
+    run_repository.log_batch.side_effect = failure
+    with pytest.raises(MlflowException) as caught:
+        run_store.record_logged_model(UUID(int=42).hex, Model(artifact_path="model"))
+    assert caught.value.error_code == "INTERNAL_ERROR"
+    assert "private" not in caught.value.message
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__
+    assert caplog.records[-1].args == (failure,)
 
 
 @pytest.mark.parametrize("name", ["named", None])

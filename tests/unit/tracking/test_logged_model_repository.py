@@ -33,6 +33,21 @@ CREATE_ARGS = {
 }
 
 
+@pytest.mark.parametrize("error_type", [OperationFailure, InvalidDocument])
+def test_finalize_translates_backend_failure(repository, collections, error_type):
+    failure = error_type("Private database details")
+    collections["logged_models"].find_one_and_update.side_effect = failure
+    with pytest.raises(RepositoryPersistenceError) as caught:
+        repository.finalize(model_id=MODEL_ID, status="READY", last_updated_timestamp=2000)
+    assert caught.value.__cause__ is failure
+
+
+def test_finalize_missing_model_is_not_a_persistence_failure(repository, collections):
+    collections["logged_models"].find_one_and_update.return_value = None
+    with pytest.raises(RepositoryNotFoundError):
+        repository.finalize(model_id=MODEL_ID, status="READY", last_updated_timestamp=2000)
+
+
 @pytest.fixture
 def collections():
     return {"logged_models": MagicMock(), "run_metrics": MagicMock()}

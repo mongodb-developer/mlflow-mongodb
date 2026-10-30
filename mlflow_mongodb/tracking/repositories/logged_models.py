@@ -109,6 +109,19 @@ class LoggedModelRepository:
         """Read the complete metric history associated with a model."""
         return self._get_metrics_by_model([model_id]).get(model_id, ())
 
+    def finalize(
+        self, *, model_id: str, status: str, last_updated_timestamp: int
+    ) -> LoggedModelRecord:
+        with repository_operation("Unable to finalize logged model."):
+            document = self._collection.find_one_and_update(
+                {"_id": model_id},
+                {"$set": {"status": status, "last_updated_timestamp": last_updated_timestamp}},
+                return_document=ReturnDocument.AFTER,
+            )
+        if document is None:
+            raise RepositoryNotFoundError(model_id)
+        return LoggedModelRecord.from_document(document)
+
     def mark_deleted(self, *, model_id: str, last_updated_timestamp: int) -> None:
         """Mark a model deleted, refreshing its timestamp even when already deleted."""
         with repository_operation("Unable to delete logged model."):
@@ -151,7 +164,7 @@ class LoggedModelRepository:
             )
         if document is None:
             raise RepositoryNotFoundError(model_id)
-        if not any(tag["k"] == key for tag in document["tags"]):
+        if not any(tag["k"] == key for tag in document.get("tags", [])):
             raise RepositoryTagNotFoundError(key)
 
     def _get_metrics_by_model(

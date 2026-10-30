@@ -211,8 +211,11 @@ class LoggedModelRecord:
             lifecycle_stage=document["lifecycle_stage"],
             source_run_id=document["source_run_id"],
             model_type=document["model_type"],
-            tags=tuple(LoggedModelTagRecord(tag["k"], tag["v"]) for tag in document["tags"]),
+            tags=tuple(
+                LoggedModelTagRecord(tag["k"], tag["v"]) for tag in document.get("tags", [])
+            ),
             params=tuple(
-                LoggedModelParameterRecord(param["k"], param["v"]) for param in document["params"]
+                LoggedModelParameterRecord(param["k"], param["v"])
+                for param in document.get("params", [])
             ),
         )
