@@ -68,6 +68,7 @@ def test_initialization_selects_configured_collections_and_creates_indexes():
         call(
             [("run_id", ASCENDING), ("k", ASCENDING), ("timestamp", ASCENDING)],
             name="run_metrics_run_k_timestamp",
+            partialFilterExpression={"scope": "run"},
         ),
         call(
             [
@@ -82,6 +83,19 @@ def test_initialization_selects_configured_collections_and_creates_indexes():
             ],
             name="run_metrics_identity",
             unique=True,
+            partialFilterExpression={"scope": "run"},
+        ),
+        call(
+            [
+                ("model_id", ASCENDING),
+                ("run_id", ASCENDING),
+                ("k", ASCENDING),
+                ("timestamp", ASCENDING),
+                ("step", ASCENDING),
+            ],
+            name="model_metrics_identity",
+            unique=True,
+            partialFilterExpression={"scope": "model"},
         ),
     ]
 
@@ -214,6 +228,7 @@ def test_metric_history_translates_failure_after_partial_cursor_iteration(
         raise backend_error
 
     cursor = MagicMock()
+    cursor.__enter__.return_value = cursor
     cursor.sort.return_value = cursor
     cursor.skip.return_value = cursor
     cursor.limit.return_value = cursor
@@ -225,6 +240,7 @@ def test_metric_history_translates_failure_after_partial_cursor_iteration(
 
     assert caught.value.__cause__ is backend_error
     convert.assert_not_called()
+    cursor.__exit__.assert_called_once()
     cursor.sort.assert_called_once_with(
         [("timestamp", ASCENDING), ("step", ASCENDING), ("v", ASCENDING), ("_id", ASCENDING)]
     )
@@ -234,6 +250,7 @@ def test_metric_history_translates_failure_after_partial_cursor_iteration(
 
 def test_metric_history_converts_materialized_documents(repository, collections):
     cursor = MagicMock()
+    cursor.__enter__.return_value = cursor
     cursor.sort.return_value = cursor
     cursor.skip.return_value = cursor
     cursor.__iter__.return_value = iter(
@@ -246,7 +263,9 @@ def test_metric_history_converts_materialized_documents(repository, collections)
     assert [(record.key, record.value, record.run_id) for record in records] == [
         ("loss", 0.4, RUN_ID)
     ]
-    collections["run_metrics"].find.assert_called_once_with({"run_id": RUN_ID, "k": "loss"})
+    collections["run_metrics"].find.assert_called_once_with(
+        {"scope": "run", "run_id": RUN_ID, "k": "loss"}
+    )
     cursor.limit.assert_not_called()
 
 

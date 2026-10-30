@@ -4,6 +4,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+RUN_METRIC_SCOPE = "run"
+MODEL_METRIC_SCOPE = "model"
+
 
 @dataclass(frozen=True)
 class ExperimentTagRecord:

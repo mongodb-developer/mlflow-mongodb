@@ -335,7 +335,10 @@ def test_search_batches_history_for_page_only(
     assert page.records[0].metrics[0].key == "loss"
     assert page.records[0].metrics[0].dataset_digest == "abc"
     assert page.records[1].metrics == ()
-    assert collections["run_metrics"].find.call_args.args[0] == {"model_id": {"$in": ids[:2]}}
+    assert collections["run_metrics"].find.call_args.args[0] == {
+        "scope": "model",
+        "model_id": {"$in": ids[:2]},
+    }
     assert documents[0]["params"] == [{"k": "depth", "v": "3"}]
 
 

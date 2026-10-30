@@ -14,6 +14,7 @@ from mlflow.exceptions import MlflowException
 from mlflow.models import Model
 from mlflow.protos.databricks_pb2 import (
     BAD_REQUEST,
+    INTERNAL_ERROR,
     INVALID_PARAMETER_VALUE,
     RESOURCE_DOES_NOT_EXIST,
     ErrorCode,
@@ -44,6 +45,101 @@ def test_get_logged_model_dedupes_and_sanitizes_metrics(store, run):
     assert metrics[0].step == 1
     assert metrics[0].model_id == model.model_id
     assert metrics[0].run_id == run.info.run_id
+
+
+@pytest.mark.parametrize(
+    "first_dataset,second_dataset",
+    [
+        ((None, None), (None, None)),
+        (("eval", "a"), ("train", "b")),
+    ],
+)
+def test_shared_points_keep_both_models_and_one_paginated_run_history(
+    store, run, first_dataset, second_dataset
+):
+    first = store.create_logged_model(run.info.experiment_id, name="first")
+    second = store.create_logged_model(run.info.experiment_id, name="second")
+    metrics = [
+        Metric(
+            "loss",
+            timestamp / 10000,
+            timestamp,
+            1,
+            model_id=model.model_id,
+            dataset_name=dataset[0],
+            dataset_digest=dataset[1],
+        )
+        for model, dataset in ((first, first_dataset), (second, second_dataset))
+        for timestamp in (1000, 2000)
+    ]
+    metrics.append(Metric("loss", 0.3, 3000, 1))
+    store.log_batch(run.info.run_id, metrics=[*metrics, *metrics], params=[], tags=[])
+    store.log_batch(run.info.run_id, metrics=metrics, params=[], tags=[])
+
+    for model, dataset in ((first, first_dataset), (second, second_dataset)):
+        history = store.get_logged_model(model.model_id).metrics
+        assert len(history) == 2
+        assert sorted(metric.timestamp for metric in history) == [1000, 2000]
+        assert all(metric.model_id == model.model_id for metric in history)
+        assert all(metric.run_id == run.info.run_id for metric in history)
+        assert {(metric.dataset_name, metric.dataset_digest) for metric in history} == {dataset}
+
+    first_page = store.get_metric_history(run.info.run_id, "loss", max_results=1)
+    second_page = store.get_metric_history(
+        run.info.run_id, "loss", max_results=1, page_token=first_page.token
+    )
+    third_page = store.get_metric_history(
+        run.info.run_id, "loss", max_results=1, page_token=second_page.token
+    )
+    assert first_page.token and second_page.token
+    assert third_page.token is None
+    history = [*first_page, *second_page, *third_page]
+    assert [metric.timestamp for metric in history] == [1000, 2000, 3000]
+    assert [metric.value for metric in history] == pytest.approx([0.1, 0.2, 0.3])
+    assert all(metric.model_id is None for metric in history)
+    assert all(metric.dataset_name is None and metric.dataset_digest is None for metric in history)
+
+    collection = store._database[store._settings.run_metrics_collection_name]
+    assert collection.count_documents({"scope": "run", "run_id": run.info.run_id}) == 3
+    assert collection.count_documents({"scope": "model", "run_id": run.info.run_id}) == 4
+    assert collection.count_documents({"run_id": run.info.run_id}) == 7
+    document = collection.find_one({"scope": "run", "run_id": run.info.run_id})
+    assert set(document) == {"_id", "scope", "run_id", "k", "v", "timestamp", "step"}
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        {"value": 0.8},
+        {"dataset_name": "train", "dataset_digest": "b"},
+    ],
+)
+def test_conflicting_model_point_is_rejected_without_replacing_existing_point(
+    store, run, replacement
+):
+    model = store.create_logged_model(run.info.experiment_id, name="conflict")
+    point = {
+        "key": "loss",
+        "value": 0.4,
+        "timestamp": 1000,
+        "step": 1,
+        "model_id": model.model_id,
+        "dataset_name": "eval",
+        "dataset_digest": "a",
+    }
+    store.log_metric(run.info.run_id, Metric(**point))
+
+    with pytest.raises(MlflowException) as caught:
+        store.log_metric(run.info.run_id, Metric(**{**point, **replacement}))
+
+    assert caught.value.error_code == ErrorCode.Name(INTERNAL_ERROR)
+    assert caught.value.message == "Unable to log run batch."
+    assert caught.value.__cause__ is None
+    history = store.get_logged_model(model.model_id).metrics
+    assert len(history) == 1
+    assert history[0].value == pytest.approx(0.4)
+    assert history[0].dataset_name == "eval"
+    assert history[0].dataset_digest == "a"
 
 
 @pytest.mark.parametrize("status", [LoggedModelStatus.READY, LoggedModelStatus.FAILED])

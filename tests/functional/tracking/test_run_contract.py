@@ -121,7 +121,7 @@ def test_latest_metric_uses_step_then_timestamp_then_value_and_keeps_history(sto
     assert len(history) == len(events)
 
 
-def test_metric_history_pagination_is_scoped_and_preserves_model_dataset_identity(store, run):
+def test_metric_history_pagination_is_scoped_to_run_points(store, run):
     run_id = run.info.run_id
     model_id = "m-" + "a" * 32
     events = [
@@ -148,10 +148,8 @@ def test_metric_history_pagination_is_scoped_and_preserves_model_dataset_identit
     assert [metric.value for metric in history] == [metric.value for metric in events]
     assert first.token and second.token
     assert third.token is None
-    assert all(metric.run_id == run_id and metric.model_id == model_id for metric in history)
-    assert all(
-        metric.dataset_name == "training" and metric.dataset_digest == "abc" for metric in history
-    )
+    assert all(metric.run_id == run_id and metric.model_id is None for metric in history)
+    assert all(metric.dataset_name is None and metric.dataset_digest is None for metric in history)
     assert store.get_metric_history(run_id, "absent") == []
 
 

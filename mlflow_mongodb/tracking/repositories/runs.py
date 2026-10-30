@@ -19,7 +19,12 @@ from mlflow_mongodb.infrastructure.errors import (
 from mlflow_mongodb.infrastructure.repository_operations import repository_operation
 from mlflow_mongodb.infrastructure.search_filters import build_value_condition
 from mlflow_mongodb.infrastructure.settings import MongoDBSettings
-from mlflow_mongodb.tracking.types import RunMetricRecord, RunRecord
+from mlflow_mongodb.tracking.types import (
+    MODEL_METRIC_SCOPE,
+    RUN_METRIC_SCOPE,
+    RunMetricRecord,
+    RunRecord,
+)
 
 
 @dataclass(frozen=True)
@@ -64,11 +69,25 @@ class RunRepository:
             self._metrics_collection.create_index(
                 [("run_id", ASCENDING), ("k", ASCENDING), ("timestamp", ASCENDING)],
                 name="run_metrics_run_k_timestamp",
+                partialFilterExpression={"scope": RUN_METRIC_SCOPE},
             )
             self._metrics_collection.create_index(
                 [(field, ASCENDING) for field in self._METRIC_IDENTITY_FIELDS],
                 name="run_metrics_identity",
                 unique=True,
+                partialFilterExpression={"scope": RUN_METRIC_SCOPE},
+            )
+            self._metrics_collection.create_index(
+                [
+                    ("model_id", ASCENDING),
+                    ("run_id", ASCENDING),
+                    ("k", ASCENDING),
+                    ("timestamp", ASCENDING),
+                    ("step", ASCENDING),
+                ],
+                name="model_metrics_identity",
+                unique=True,
+                partialFilterExpression={"scope": MODEL_METRIC_SCOPE},
             )
 
     def search(
@@ -284,7 +303,9 @@ class RunRepository:
     ) -> list[RunMetricRecord]:
         with repository_operation("Unable to read metric history."):
             cursor = (
-                self._metrics_collection.find({"run_id": run_id, "k": metric_key})
+                self._metrics_collection.find(
+                    {"scope": RUN_METRIC_SCOPE, "run_id": run_id, "k": metric_key}
+                )
                 .sort(
                     [
                         ("timestamp", ASCENDING),
@@ -298,7 +319,8 @@ class RunRepository:
             )
             if limit is not None:
                 cursor = cursor.limit(limit)
-            documents = list(cursor)
+            with cursor:
+                documents = list(cursor)
         return [RunMetricRecord.from_document(document) for document in documents]
 
     def mark_deleted(
@@ -385,6 +407,10 @@ class RunRepository:
         return RunRecord.from_document(updated)
 
     def log_batch(self, *, run_id, metrics, params, tags) -> None:
+        run_metrics = [
+            {field: metric[field] for field in ("k", "v", "timestamp", "step")}
+            for metric in metrics
+        ]
         conditions = [{"$eq": ["$lifecycle_stage", LifecycleStage.ACTIVE]}]
         for parameter in params:
             conflicting_params = {
@@ -403,7 +429,7 @@ class RunRepository:
 
         fields_to_update = {}
         if metrics:
-            fields_to_update["metrics"] = self._latest_metrics_expression(metrics)
+            fields_to_update["metrics"] = self._latest_metrics_expression(run_metrics)
         if params:
             params_by_key = {param["k"]: param for param in params}
             fields_to_update["params"] = build_merge_array_expression(
@@ -451,10 +477,19 @@ class RunRepository:
                     )
 
         if metrics:
-            metric_documents = [{**metric, "run_id": run_id} for metric in metrics]
+            metric_documents = [
+                {**metric, "run_id": run_id, "scope": RUN_METRIC_SCOPE} for metric in run_metrics
+            ]
+            metric_documents.extend(
+                {**metric, "run_id": run_id, "scope": MODEL_METRIC_SCOPE}
+                for metric in metrics
+                if metric.get("model_id") is not None
+            )
             operations = [
                 UpdateOne(
-                    {field: document.get(field) for field in self._METRIC_IDENTITY_FIELDS},
+                    # Match the complete point: a conflicting model value or dataset
+                    # must violate its unique index rather than become a silent no-op.
+                    document,
                     {"$setOnInsert": document},
                     upsert=True,
                 )

@@ -20,7 +20,7 @@ from mlflow_mongodb.infrastructure.errors import (
 from mlflow_mongodb.infrastructure.repository_operations import repository_operation
 from mlflow_mongodb.infrastructure.search_filters import COMPARISON_OPERATORS, like_regex
 from mlflow_mongodb.infrastructure.settings import MongoDBSettings
-from mlflow_mongodb.tracking.types import LoggedModelRecord, RunMetricRecord
+from mlflow_mongodb.tracking.types import MODEL_METRIC_SCOPE, LoggedModelRecord, RunMetricRecord
 
 
 @dataclass(frozen=True)
@@ -96,6 +96,7 @@ class LoggedModelRepository:
                     ("_id", ASCENDING),
                 ],
                 name="run_metrics_model_k_latest",
+                partialFilterExpression={"scope": MODEL_METRIC_SCOPE},
             )
             self._metrics_collection.create_index(
                 [
@@ -104,6 +105,7 @@ class LoggedModelRepository:
                     ("dataset_digest", ASCENDING),
                 ],
                 name="run_metrics_model_dataset",
+                partialFilterExpression={"scope": MODEL_METRIC_SCOPE},
             )
 
     def create(
@@ -282,7 +284,7 @@ class LoggedModelRepository:
         if model_ids:
             with repository_operation("Unable to read logged model metric history."):
                 metrics = self._metrics_collection.find(
-                    {"model_id": {"$in": list(model_ids)}},
+                    {"scope": MODEL_METRIC_SCOPE, "model_id": {"$in": list(model_ids)}},
                     {
                         "_id": 0,
                         "model_id": 1,
@@ -381,7 +383,9 @@ class LoggedModelRepository:
 
         # Fetch the union of rows needed by filtering and ordering. Intersecting
         # their scopes here would lose valid matches or the latest sort value.
-        metric_pipeline: list[dict[str, Any]] = [{"$match": {"$or": candidates}}]
+        metric_pipeline: list[dict[str, Any]] = [
+            {"$match": {"scope": MODEL_METRIC_SCOPE, "$or": candidates}}
+        ]
         if order_matches:
             metric_pipeline.append({"$set": order_matches})
         metric_pipeline.append({"$group": group})
