@@ -3,9 +3,25 @@
 import pytest
 
 from mlflow_mongodb.infrastructure.array_operations import (
+    build_array_value_expression,
     build_remove_array_element_update,
     build_replace_array_element_pipeline,
 )
+
+
+@pytest.mark.parametrize("key", ["team", "team.name", "$team", ""])
+def test_array_value_expression_reads_literal_keys_and_normalizes_missing_values(key):
+    assert build_array_value_expression("$tags", key) == {
+        "$ifNull": [
+            {
+                "$getField": {
+                    "field": {"$literal": key},
+                    "input": {"$arrayToObject": {"$ifNull": ["$tags", []]}},
+                }
+            },
+            None,
+        ]
+    }
 
 
 @pytest.mark.parametrize(("array_field", "key_field"), [("tags", "k"), ("aliases", "alias")])

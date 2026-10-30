@@ -1,6 +1,5 @@
-"""MongoDB model registry store plugin for MLflow."""
+"""MongoDB backend for MLflow tracking and model registry."""
 
 from mlflow_mongodb._version import __version__
-from mlflow_mongodb.model_registry.store import MongoDBModelRegistryStore
 
-__all__ = ["MongoDBModelRegistryStore", "__version__"]
+__all__ = ["__version__"]

@@ -1,0 +1,133 @@
+from unittest.mock import MagicMock, Mock, call
+
+import pytest
+from mlflow.exceptions import MlflowException
+from mlflow.protos.databricks_pb2 import INVALID_PARAMETER_VALUE, ErrorCode
+from mlflow.utils.uri import resolve_uri_if_local
+from pymongo.driver_info import DriverInfo
+from pymongo.errors import ConfigurationError
+
+from mlflow_mongodb._version import __version__
+from mlflow_mongodb.tracking.repositories import ExperimentRepository
+from mlflow_mongodb.tracking.store import MongoDBTrackingStore
+
+
+def test_mongo_client_is_lazy_and_cached(monkeypatch):
+    client = Mock()
+    client_factory = Mock(return_value=client)
+    monkeypatch.setattr("mlflow_mongodb.tracking.store.MongoClient", client_factory)
+    store = MongoDBTrackingStore("mongodb://localhost:27017/mlflow")
+
+    client_factory.assert_not_called()
+
+    assert store._mongo_client is client
+    assert store._mongo_client is client
+    client_factory.assert_called_once_with(
+        "mongodb://localhost:27017/mlflow", driver=DriverInfo(name="mlflow", version=__version__)
+    )
+
+
+def test_mongo_client_requires_tracking_uri():
+    store = MongoDBTrackingStore()
+
+    with pytest.raises(MlflowException, match="MongoDB tracking URI is required") as caught:
+        store._mongo_client
+
+    assert caught.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
+
+
+def test_mongo_client_translates_invalid_uri(monkeypatch):
+    client_factory = Mock(side_effect=ConfigurationError("Private URI details"))
+    monkeypatch.setattr("mlflow_mongodb.tracking.store.MongoClient", client_factory)
+    store = MongoDBTrackingStore("not-mongodb://localhost/mlflow")
+
+    with pytest.raises(MlflowException) as caught:
+        store._mongo_client
+
+    assert caught.value.message == "Invalid MongoDB tracking URI."
+    assert caught.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True
+    client_factory.assert_called_once_with(
+        "not-mongodb://localhost/mlflow", driver=DriverInfo(name="mlflow", version=__version__)
+    )
+
+
+def test_database_requires_name_in_uri():
+    client = Mock()
+    client.get_default_database.side_effect = ConfigurationError("Private database details")
+    store = MongoDBTrackingStore("mongodb://localhost:27017")
+    store.__dict__["_mongo_client"] = client
+
+    with pytest.raises(MlflowException, match="must include a database name") as caught:
+        store._database
+
+    assert caught.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True
+    client.get_default_database.assert_called_once_with()
+
+
+def test_database_is_lazy_and_cached():
+    database = Mock()
+    client = Mock()
+    client.get_default_database.return_value = database
+    store = MongoDBTrackingStore("mongodb://localhost:27017/mlflow")
+    store.__dict__["_mongo_client"] = client
+
+    client.get_default_database.assert_not_called()
+
+    assert store._database is database
+    assert store._database is database
+    client.get_default_database.assert_called_once_with()
+
+
+def test_store_uses_configured_experiment_collection(monkeypatch):
+    monkeypatch.setenv("MLFLOW_MONGODB_EXPERIMENTS_COLLECTION", "custom_experiments")
+    monkeypatch.setenv("MLFLOW_MONGODB_EXPERIMENT_ID_COUNTERS_COLLECTION", "custom_counters")
+    database = MagicMock()
+    collection = MagicMock()
+    database.__getitem__.return_value = collection
+    store = MongoDBTrackingStore("mongodb://localhost:27017/mlflow")
+    store.__dict__["_database"] = database
+
+    repository = store._experiment_repository
+
+    assert repository._collection is collection
+    assert repository._counter_collection is collection
+    assert store._experiment_repository is repository
+    database.__getitem__.assert_has_calls([call("custom_experiments"), call("custom_counters")])
+    assert collection.create_index.call_count == 2
+
+
+@pytest.mark.parametrize(
+    "environment_variable",
+    [
+        "MLFLOW_MONGODB_EXPERIMENTS_COLLECTION",
+        "MLFLOW_MONGODB_EXPERIMENT_ID_COUNTERS_COLLECTION",
+    ],
+)
+def test_store_rejects_invalid_configured_experiment_collection(monkeypatch, environment_variable):
+    monkeypatch.setenv(environment_variable, "invalid$name")
+
+    with pytest.raises(ValueError, match="Invalid MongoDB collection name"):
+        MongoDBTrackingStore("mongodb://localhost:27017/mlflow")
+
+
+@pytest.mark.parametrize("artifact_uri", [None, "s3://artifacts"])
+def test_repository_initializes_default_experiment_once(monkeypatch, artifact_uri):
+    repository = Mock(spec=ExperimentRepository)
+    initialize = Mock(return_value=repository)
+    monkeypatch.setattr("mlflow_mongodb.tracking.store.ExperimentRepository", initialize)
+    monkeypatch.setattr("mlflow_mongodb.tracking.store.get_current_time_millis", lambda: 1000)
+    store = MongoDBTrackingStore("mongodb://localhost:27017/mlflow", artifact_uri=artifact_uri)
+    store.__dict__["_database"] = Mock()
+
+    initialize.assert_not_called()
+    assert store._experiment_repository is repository
+    assert store._experiment_repository is repository
+
+    repository.ensure_default_experiment.assert_called_once_with(
+        artifact_location=resolve_uri_if_local(f"{artifact_uri or './mlruns'}/0"),
+        creation_timestamp=1000,
+    )

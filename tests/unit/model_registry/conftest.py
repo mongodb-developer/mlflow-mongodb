@@ -9,11 +9,11 @@ from mlflow.entities.model_registry.model_version_stages import STAGE_NONE
 from mlflow.entities.model_registry.model_version_status import ModelVersionStatus
 from mlflow.tracking.client import MlflowClient
 
-from mlflow_mongodb import MongoDBModelRegistryStore
 from mlflow_mongodb.model_registry.repositories import (
     ModelVersionRepository,
     RegisteredModelRepository,
 )
+from mlflow_mongodb.model_registry.store import MongoDBModelRegistryStore
 from mlflow_mongodb.model_registry.types import (
     ModelVersionRecord,
     ModelVersionTagRecord,
