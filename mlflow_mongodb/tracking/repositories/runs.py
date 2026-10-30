@@ -190,37 +190,30 @@ class RunRepository:
         return RunRecord.from_document(updated)
 
     def log_batch(self, *, run_id, metrics, params, tags) -> None:
-        with repository_operation("Unable to read run for batch logging."):
-            document = self._collection.find_one(
-                {"_id": run_id},
-                {"_id": 0, "lifecycle_stage": 1, "params": 1},
-            )
-        if document is None:
-            raise RepositoryNotFoundError(run_id)
-        if document["lifecycle_stage"] != LifecycleStage.ACTIVE:
-            raise RepositoryNotActiveError(run_id, document["lifecycle_stage"])
-
-        existing_params = {
-            parameter["k"]: parameter["v"] for parameter in document.get("params", [])
-        }
+        conditions = [{"$eq": ["$lifecycle_stage", LifecycleStage.ACTIVE]}]
         for parameter in params:
-            old_value = existing_params.get(parameter["k"])
-            if old_value is not None and old_value != parameter["v"]:
-                raise RepositoryParamConflictError(
-                    parameter["k"], old_value, parameter["v"], run_id
-                )
-
-        if metrics:
-            metric_documents = [{**metric, "run_id": run_id} for metric in metrics]
-            with repository_operation("Unable to insert run batch metrics."):
-                self._metrics_collection.insert_many(metric_documents, ordered=True)
+            conflicting_params = {
+                "$filter": {
+                    "input": {"$ifNull": ["$params", []]},
+                    "as": "stored",
+                    "cond": {
+                        "$and": [
+                            {"$eq": ["$$stored.k", {"$literal": parameter["k"]}]},
+                            {"$ne": ["$$stored.v", {"$literal": parameter["v"]}]},
+                        ]
+                    },
+                }
+            }
+            conditions.append({"$eq": [{"$size": conflicting_params}, 0]})
 
         fields_to_update = {}
         if metrics:
             fields_to_update["metrics"] = self._latest_metrics_expression(metrics)
         if params:
-            new_params = [param for param in params if param["k"] not in existing_params]
-            fields_to_update["params"] = build_merge_array_expression("$params", new_params, "k")
+            params_by_key = {param["k"]: param for param in params}
+            fields_to_update["params"] = build_merge_array_expression(
+                "$params", list(params_by_key.values()), "k"
+            )
         if tags:
             # Resolve duplicate batch keys once, with the last value winning.
             tags_by_key = {tag["k"]: tag for tag in tags}
@@ -230,14 +223,42 @@ class RunRepository:
             if MLFLOW_RUN_NAME in tags_by_key:
                 fields_to_update["name"] = {"$literal": tags_by_key[MLFLOW_RUN_NAME]["v"]}
 
-        if fields_to_update:
-            with repository_operation("Unable to update run batch data."):
-                result = self._collection.update_one(
-                    {"_id": run_id, "lifecycle_stage": LifecycleStage.ACTIVE},
-                    [{"$set": fields_to_update}],
-                )
-            if result.matched_count == 0:
-                raise RepositoryNotFoundError(run_id)
+        with repository_operation("Unable to update run batch data."):
+            previous = self._collection.find_one_and_update(
+                {"_id": run_id},
+                [
+                    {
+                        "$replaceWith": {
+                            "$cond": [
+                                {"$and": conditions},
+                                {"$mergeObjects": ["$$ROOT", fields_to_update]},
+                                "$$ROOT",
+                            ]
+                        }
+                    }
+                ],
+                projection={"_id": 0, "lifecycle_stage": 1, "params": 1},
+                return_document=ReturnDocument.BEFORE,
+            )
+        if previous is None:
+            raise RepositoryNotFoundError(run_id)
+        if previous["lifecycle_stage"] != LifecycleStage.ACTIVE:
+            raise RepositoryNotActiveError(run_id, previous["lifecycle_stage"])
+        existing_params = {
+            parameter["k"]: parameter["v"] for parameter in previous.get("params", [])
+        }
+        for parameter in params:
+            if parameter["k"] in existing_params:
+                old_value = existing_params[parameter["k"]]
+                if old_value != parameter["v"]:
+                    raise RepositoryParamConflictError(
+                        parameter["k"], old_value, parameter["v"], run_id
+                    )
+
+        if metrics:
+            metric_documents = [{**metric, "run_id": run_id} for metric in metrics]
+            with repository_operation("Unable to insert run batch metrics."):
+                self._metrics_collection.insert_many(metric_documents, ordered=True)
 
     def log_inputs(self, *, run_id: str, datasets: list[dict], models: list[dict]) -> None:
         """Attach dataset and model inputs with one atomic database operation."""

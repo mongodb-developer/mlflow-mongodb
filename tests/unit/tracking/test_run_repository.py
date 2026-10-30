@@ -13,7 +13,6 @@ from mlflow_mongodb.infrastructure.errors import (
     RepositoryAlreadyExistsError,
     RepositoryNotActiveError,
     RepositoryNotFoundError,
-    RepositoryParamConflictError,
     RepositoryPersistenceError,
 )
 from mlflow_mongodb.infrastructure.settings import MongoDBSettings
@@ -315,17 +314,10 @@ def test_update_info_translates_database_failure(repository, collections, error_
     assert caught.value.__cause__ is backend_error
 
 
-@pytest.mark.parametrize("stage", ["read", "metrics", "update"])
-def test_batch_boundaries_translate_failures_and_preserve_write_order(
-    repository, collections, stage
-):
-    backend_error = OperationFailure("Private batch details")
-    runs = collections["runs"]
-    metrics = collections["run_metrics"]
-    method = {"read": runs.find_one, "metrics": metrics.insert_many, "update": runs.update_one}[
-        stage
-    ]
-    method.side_effect = backend_error
+@pytest.mark.parametrize("error_type", [OperationFailure, InvalidDocument])
+def test_batch_update_failure_prevents_metric_insertion(repository, collections, error_type):
+    backend_error = error_type("Private batch update details")
+    collections["runs"].find_one_and_update.side_effect = backend_error
 
     with pytest.raises(RepositoryPersistenceError) as caught:
         repository.log_batch(
@@ -335,76 +327,21 @@ def test_batch_boundaries_translate_failures_and_preserve_write_order(
             tags=[{"k": "team", "v": "risk"}],
         )
 
+    assert str(caught.value) == "Unable to update run batch data."
     assert caught.value.__cause__ is backend_error
-    if stage == "read":
-        metrics.insert_many.assert_not_called()
-    else:
-        metrics.insert_many.assert_called_once()
-    if stage != "update":
-        runs.update_one.assert_not_called()
-
-
-def test_parameter_conflict_precedes_metric_insertion(repository, collections):
-    collections["runs"].find_one.return_value = {
-        "lifecycle_stage": LifecycleStage.ACTIVE,
-        "params": [{"k": "depth", "v": "3"}],
-    }
-
-    with pytest.raises(RepositoryParamConflictError) as caught:
-        repository.log_batch(
-            run_id=RUN_ID,
-            metrics=[{"k": "loss", "v": 0.4, "timestamp": 1000, "step": 1}],
-            params=[{"k": "depth", "v": "4"}],
-            tags=[],
-        )
-
-    assert caught.value.args == ("depth", "3", "4", RUN_ID)
+    collections["runs"].find_one.assert_not_called()
     collections["run_metrics"].insert_many.assert_not_called()
-    collections["runs"].update_one.assert_not_called()
 
 
-def test_empty_batch_checks_run_without_writing(repository, collections):
-    repository.log_batch(run_id=RUN_ID, metrics=[], params=[], tags=[])
+@pytest.mark.parametrize("error_type", [OperationFailure, InvalidDocument])
+def test_batch_metric_insertion_failure_follows_run_update(repository, collections, error_type):
+    backend_error = error_type("Private metric insertion details")
+    collections["run_metrics"].insert_many.side_effect = backend_error
+    operations = Mock()
+    operations.attach_mock(collections["runs"].find_one_and_update, "update")
+    operations.attach_mock(collections["run_metrics"].insert_many, "insert")
 
-    collections["runs"].find_one.assert_called_once()
-    collections["run_metrics"].insert_many.assert_not_called()
-    collections["runs"].update_one.assert_not_called()
-
-
-@pytest.mark.parametrize("nonempty", [False, True])
-def test_batch_with_deleted_run_does_not_write(repository, collections, nonempty):
-    collections["runs"].find_one.return_value = {
-        "lifecycle_stage": LifecycleStage.DELETED,
-        "params": [{"k": "depth", "v": "3"}],
-    }
-
-    with pytest.raises(RepositoryNotActiveError) as caught:
-        repository.log_batch(
-            run_id=RUN_ID,
-            metrics=[{"k": "loss", "v": 0.4, "timestamp": 1000, "step": 1}] if nonempty else [],
-            params=[{"k": "depth", "v": "4"}] if nonempty else [],
-            tags=[{"k": "team", "v": "risk"}] if nonempty else [],
-        )
-
-    assert caught.value.args == (RUN_ID, LifecycleStage.DELETED)
-    collections["run_metrics"].insert_many.assert_not_called()
-    collections["runs"].update_one.assert_not_called()
-
-
-def test_batch_with_missing_run_does_not_write(repository, collections):
-    collections["runs"].find_one.return_value = None
-
-    with pytest.raises(RepositoryNotFoundError):
-        repository.log_batch(run_id=RUN_ID, metrics=[], params=[], tags=[])
-
-    collections["run_metrics"].insert_many.assert_not_called()
-    collections["runs"].update_one.assert_not_called()
-
-
-def test_batch_reports_run_disappearing_after_metric_insertion(repository, collections):
-    collections["runs"].update_one.return_value.matched_count = 0
-
-    with pytest.raises(RepositoryNotFoundError) as caught:
+    with pytest.raises(RepositoryPersistenceError) as caught:
         repository.log_batch(
             run_id=RUN_ID,
             metrics=[{"k": "loss", "v": 0.4, "timestamp": 1000, "step": 1}],
@@ -412,9 +349,10 @@ def test_batch_reports_run_disappearing_after_metric_insertion(repository, colle
             tags=[],
         )
 
-    assert caught.value.args == (RUN_ID,)
-    collections["run_metrics"].insert_many.assert_called_once()
-    collections["runs"].update_one.assert_called_once()
+    assert str(caught.value) == "Unable to insert run batch metrics."
+    assert caught.value.__cause__ is backend_error
+    assert [operation[0] for operation in operations.mock_calls] == ["update", "insert"]
+    collections["runs"].find_one.assert_not_called()
 
 
 @pytest.mark.parametrize("method", ["log_inputs", "log_outputs"])

@@ -185,18 +185,65 @@ def test_nan_ranks_as_zero_for_latest_metric_value_ties(store, run):
     assert store.get_run(run_id).data.metrics["loss"] == pytest.approx(0.1)
 
 
-def test_parameters_are_immutable_and_conflict_precedes_metric_write(store, run):
+@pytest.mark.parametrize(
+    ("key", "old_value", "new_value"),
+    [("depth", "3", "4"), ("label", "$3", "$4"), ("a.b", "yes", "no")],
+)
+def test_parameters_are_immutable_and_conflict_precedes_metric_write(
+    store, run, key, old_value, new_value
+):
     run_id = run.info.run_id
-    store.log_param(run_id, Param("depth", "3"))
-    store.log_param(run_id, Param("depth", "3"))
+    store.log_param(run_id, Param(key, old_value))
+    store.log_param(run_id, Param(key, old_value))
+    before = _stored_run(store, run_id)
 
     with pytest.raises(MlflowException, match="Changing param values is not allowed") as caught:
-        store.log_batch(run_id, [Metric("loss", 0.4, 1000, 0)], [Param("depth", "4")], [])
+        store.log_batch(
+            run_id,
+            [Metric("loss", 0.4, 1000, 0)],
+            [Param("new_param", "value"), Param(key, new_value)],
+            [RunTag(MLFLOW_RUN_NAME, "$changed")],
+        )
 
     assert caught.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
     assert caught.value.__cause__ is None
-    assert _stored_run(store, run_id)["params"] == [{"k": "depth", "v": "3"}]
+    assert _stored_run(store, run_id) == before
     assert store.get_metric_history(run_id, "loss") == []
+
+
+def test_empty_batch_preserves_active_run(store, run):
+    before = _stored_run(store, run.info.run_id)
+
+    store.log_batch(run.info.run_id, [], [], [])
+
+    assert _stored_run(store, run.info.run_id) == before
+    assert store.get_metric_history(run.info.run_id, "loss") == []
+
+
+@pytest.mark.parametrize(
+    ("metrics", "params", "tags"),
+    [
+        ([], [], []),
+        ([Metric("loss", 0.4, 1000, 0)], [Param("depth", "3")], [RunTag("team", "risk")]),
+    ],
+)
+def test_batch_with_missing_run_does_not_insert_data(store, run, metrics, params, tags):
+    missing_id = "f" * 32
+    before = _stored_run(store, run.info.run_id)
+
+    with pytest.raises(MlflowException, match="not found") as caught:
+        store.log_batch(missing_id, metrics, params, tags)
+
+    assert caught.value.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST)
+    assert _stored_run(store, missing_id) is None
+    assert _stored_run(store, run.info.run_id) == before
+    assert store.get_metric_history(run.info.run_id, "loss") == []
+    assert (
+        store._database[store._settings.run_metrics_collection_name].count_documents(
+            {"run_id": missing_id}
+        )
+        == 0
+    )
 
 
 def test_batch_tags_keep_last_value_and_synchronize_run_name(store, run):
