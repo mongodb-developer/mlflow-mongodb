@@ -2413,15 +2413,11 @@ class MongoDBTrackingStore(AbstractStore):
             field_types=("attribute", "tag"),
             attribute_keys=SearchEvaluationDatasetsUtils.VALID_SEARCH_ATTRIBUTE_KEYS,
             comparators={
-                "attribute": SearchEvaluationDatasetsUtils.VALID_TAG_COMPARATORS,
+                "attribute": (
+                    SearchEvaluationDatasetsUtils.VALID_NUMERIC_ATTRIBUTE_COMPARATORS
+                    | SearchEvaluationDatasetsUtils.VALID_TAG_COMPARATORS
+                ),
                 "tag": SearchEvaluationDatasetsUtils.VALID_TAG_COMPARATORS,
-            },
-            field_comparators={
-                (
-                    "attribute",
-                    key,
-                ): SearchEvaluationDatasetsUtils.VALID_NUMERIC_ATTRIBUTE_COMPARATORS
-                for key in SearchEvaluationDatasetsUtils.NUMERIC_ATTRIBUTES
             },
             uppercase_comparators=False,
         )

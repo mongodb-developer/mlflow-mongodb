@@ -24,10 +24,20 @@ pytestmark = pytest.mark.skipif(
         "name = 'evaluation'",
         "name != 'other'",
         "name LIKE 'eval%'",
+        "name > 'evaluation'",
+        "name >= 'evaluation'",
+        "name < 'evaluation'",
+        "name <= 'evaluation'",
         "created_by = 'reviewer'",
+        "created_by > 'reviewer'",
         "last_updated_by = 'reviewer'",
+        "last_updated_by < 'reviewer'",
         "created_time >= 1000",
+        "created_time LIKE 1000",
+        "created_time ILIKE 1000",
         "last_update_time < 2000",
+        "last_update_time LIKE 2000",
+        "last_update_time ILIKE 2000",
         "tags.team = '$risk'",
         "tags.team ILIKE 'RISK%'",
         "tags.created_time = 'literal'",
@@ -86,21 +96,20 @@ def test_invalid_filter_syntax_and_fields_are_rejected(store, expression):
 
 
 @pytest.mark.parametrize(
-    "expression,field_type,comparator",
+    "comparator",
     [
-        ("name > 'evaluation'", "attribute", ">"),
-        ("tags.team > 'risk'", "tag", ">"),
-        ("created_time LIKE 1000", "attribute", "LIKE"),
+        ">",
+        ">=",
+        "<",
+        "<=",
     ],
 )
-def test_validator_rejects_unsupported_comparators(store, expression, field_type, comparator):
+def test_validator_rejects_unsupported_tag_comparators(store, comparator):
     with pytest.raises(MlflowException) as caught:
-        store.search_datasets(filter_string=expression)
+        store.search_datasets(filter_string=f"tags.team {comparator} 'risk'")
 
     assert caught.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
-    assert caught.value.message == (
-        f"Invalid comparator for evaluation dataset {field_type}: {comparator}"
-    )
+    assert caught.value.message == (f"Invalid comparator for evaluation dataset tag: {comparator}")
     assert caught.value.__cause__ is None
     assert caught.value.__suppress_context__ is True
 
