@@ -129,9 +129,9 @@ jobs:
       - name: Set up signing credentials
         uses: mongodb-labs/drivers-github-tools/setup@99b1cbd729bc83bf7fc74e1b2a97fffad3d65d7b # v3.1.1
         with:
-          aws_role_arn: ${{ secrets.AWS_ROLE_ARN }}
-          aws_region_name: ${{ vars.AWS_REGION_NAME }}
-          aws_secret_id: ${{ secrets.AWS_SECRET_ID }}
+          aws_role_arn: ${{ secrets.AWS_SIGNING_ROLE_ARN }}
+          aws_region_name: ${{ secrets.AWS_SIGNING_REGION }}
+          aws_secret_id: ${{ secrets.AWS_SIGNING_SECRET_ID }}
 
       - name: Sign distributions with Garasign
         uses: mongodb-labs/drivers-github-tools/gpg-sign@99b1cbd729bc83bf7fc74e1b2a97fffad3d65d7b # v3.1.1
@@ -162,9 +162,9 @@ jobs:
       - name: Set up Kondukto credentials
         uses: mongodb-labs/drivers-github-tools/setup@99b1cbd729bc83bf7fc74e1b2a97fffad3d65d7b # v3.1.1
         with:
-          aws_role_arn: ${{ secrets.AWS_ROLE_ARN }}
-          aws_region_name: ${{ vars.AWS_REGION_NAME }}
-          aws_secret_id: ${{ secrets.AWS_SECRET_ID }}
+          aws_role_arn: ${{ secrets.AWS_SIGNING_ROLE_ARN }}
+          aws_region_name: ${{ secrets.AWS_SIGNING_REGION }}
+          aws_secret_id: ${{ secrets.AWS_SIGNING_SECRET_ID }}
 
       # Runs Silkbomb: refreshes sbom.json, augments it with vulnerability
       # data, and uploads the result to Kondukto under this ref's branch.
