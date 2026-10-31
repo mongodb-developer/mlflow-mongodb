@@ -30,6 +30,100 @@ def _stored_model(store, model_id):
     )
 
 
+@pytest.mark.parametrize("initial", [[], [("depth", "3")]])
+@pytest.mark.parametrize("incoming", [[], [("team.name", "$risk"), ("$literal", "$value")]])
+def test_log_model_params_appends_literals_and_preserves_other_fields(
+    store, run, clock, initial, incoming
+):
+    model = store.create_logged_model(
+        run.info.experiment_id,
+        name="params",
+        tags=[LoggedModelTag("team", "risk")],
+        params=[LoggedModelParameter(key, value) for key, value in initial],
+    )
+    before = _stored_model(store, model.model_id)
+    clock["now"] += 1000
+
+    store.log_logged_model_params(
+        model.model_id, [LoggedModelParameter(key, value) for key, value in incoming]
+    )
+
+    expected = [*initial, *incoming]
+    assert store.get_logged_model(model.model_id).params == dict(expected)
+    assert _stored_model(store, model.model_id) == {
+        **before,
+        "params": [{"k": key, "v": value} for key, value in expected],
+    }
+
+
+@pytest.mark.parametrize("value", ["3", "4"])
+@pytest.mark.parametrize("conflict_index", [0, 1])
+def test_log_model_params_existing_key_rejects_entire_batch(store, run, value, conflict_index):
+    model = store.create_logged_model(
+        run.info.experiment_id, name="params", params=[LoggedModelParameter("depth", "3")]
+    )
+    before = _stored_model(store, model.model_id)
+    params = [LoggedModelParameter("new", "value")]
+    params.insert(conflict_index, LoggedModelParameter("depth", value))
+
+    with pytest.raises(MlflowException) as caught:
+        store.log_logged_model_params(model.model_id, params)
+
+    assert caught.value.error_code == ErrorCode.Name(BAD_REQUEST)
+    assert _stored_model(store, model.model_id) == before
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        [("duplicate", "one"), ("duplicate", "one")],
+        [("duplicate", "one"), ("duplicate", "two")],
+        [(None, "value")],
+        [("key", None)],
+    ],
+)
+def test_log_model_params_invalid_entries_leave_model_unchanged(store, run, invalid):
+    model = store.create_logged_model(
+        run.info.experiment_id, name="params", params=[LoggedModelParameter("depth", "3")]
+    )
+    before = _stored_model(store, model.model_id)
+    params = [LoggedModelParameter(key, value) for key, value in [("new", "value"), *invalid]]
+
+    with pytest.raises(MlflowException) as caught:
+        store.log_logged_model_params(model.model_id, params)
+
+    assert caught.value.error_code == ErrorCode.Name(BAD_REQUEST)
+    assert _stored_model(store, model.model_id) == before
+
+
+def test_log_model_params_accepts_deleted_model_without_changing_lifecycle(store, run, clock):
+    model = store.create_logged_model(run.info.experiment_id, name="params")
+    store.delete_logged_model(model.model_id)
+    before = _stored_model(store, model.model_id)
+    clock["now"] += 1000
+
+    store.log_logged_model_params(model.model_id, [LoggedModelParameter("depth", "3")])
+
+    assert store.get_logged_model(model.model_id, allow_deleted=True).params == {"depth": "3"}
+    assert _stored_model(store, model.model_id) == {
+        **before,
+        "params": [{"k": "depth", "v": "3"}],
+    }
+
+
+@pytest.mark.parametrize("entries", [[], [("depth", "3")], [("depth", None)]])
+def test_log_model_params_missing_model_does_not_insert(store, entries):
+    model_id = "m-" + "f" * 32
+
+    with pytest.raises(MlflowException) as caught:
+        store.log_logged_model_params(
+            model_id, [LoggedModelParameter(key, value) for key, value in entries]
+        )
+
+    assert caught.value.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST)
+    assert _stored_model(store, model_id) is None
+
+
 def test_get_logged_model_dedupes_and_sanitizes_metrics(store, run):
     model = store.create_logged_model(run.info.experiment_id, name="retried-metric")
     metric = Metric("loss", float("inf"), 1000, 1, model_id=model.model_id)

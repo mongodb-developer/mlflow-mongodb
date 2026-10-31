@@ -10,6 +10,7 @@ from pymongo.errors import OperationFailure
 
 import mlflow_mongodb.tracking.repositories.logged_models as model_module
 from mlflow_mongodb.infrastructure.errors import (
+    RepositoryAlreadyExistsError,
     RepositoryNotFoundError,
     RepositoryPersistenceError,
     RepositoryTagNotFoundError,
@@ -31,6 +32,41 @@ CREATE_ARGS = {
     "tags": {"team.name": "$risk"},
     "params": {"depth": "3"},
 }
+
+
+@pytest.mark.parametrize("params", [{}, {"depth": "3"}])
+def test_log_params_reports_missing_model_even_for_empty_batch(repository, collections, params):
+    collections["logged_models"].find_one_and_update.return_value = None
+
+    with pytest.raises(RepositoryNotFoundError) as caught:
+        repository.log_params(model_id=MODEL_ID, params=params)
+
+    assert caught.value.resource_id == MODEL_ID
+    collections["logged_models"].find_one.assert_not_called()
+
+
+@pytest.mark.parametrize("value", ["3", "4"])
+def test_log_params_rejects_existing_key_even_when_value_is_unchanged(
+    repository, collections, value
+):
+    collections["logged_models"].find_one_and_update.return_value = {"params": [{"k": "depth"}]}
+
+    with pytest.raises(RepositoryAlreadyExistsError) as caught:
+        repository.log_params(model_id=MODEL_ID, params={"depth": value, "new": "value"})
+
+    assert caught.value.args == (MODEL_ID,)
+    collections["logged_models"].find_one.assert_not_called()
+
+
+@pytest.mark.parametrize("error_type", [OperationFailure, InvalidDocument])
+def test_log_params_translates_backend_failure(repository, collections, error_type):
+    failure = error_type("Private database details")
+    collections["logged_models"].find_one_and_update.side_effect = failure
+
+    with pytest.raises(RepositoryPersistenceError) as caught:
+        repository.log_params(model_id=MODEL_ID, params={"depth": "3"})
+
+    assert caught.value.__cause__ is failure
 
 
 @pytest.mark.parametrize("error_type", [OperationFailure, InvalidDocument])
