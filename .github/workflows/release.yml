@@ -3,8 +3,7 @@ name: Release
 on:
   release:
     types: [published]
-  # Manual runs are dry runs: test, build, and sign, but never publish or
-  # attach anything to a release.
+  # Manual runs are dry runs: test and build only, never publish.
   workflow_dispatch:
 
 # No concurrency group here: the reusable tests workflow keys its own group
@@ -111,43 +110,9 @@ jobs:
           MONGODB_URI: ${{ steps.mongodb.outputs.uri }}
         run: python -m pytest tests/unit tests/functional
 
-  sign:
-    name: Sign distributions
-    needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    environment: release-signing
-    permissions:
-      id-token: write # required to assume the AWS signing role
-    steps:
-      - name: Download distributions
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: dist
-          path: dist/
-
-      - name: Set up signing credentials
-        uses: mongodb-labs/drivers-github-tools/setup@99b1cbd729bc83bf7fc74e1b2a97fffad3d65d7b # v3.1.1
-        with:
-          aws_role_arn: ${{ secrets.AWS_SIGNING_ROLE_ARN }}
-          aws_region_name: ${{ secrets.AWS_SIGNING_REGION }}
-          aws_secret_id: ${{ secrets.AWS_SIGNING_SECRET_ID }}
-
-      - name: Sign distributions with Garasign
-        uses: mongodb-labs/drivers-github-tools/gpg-sign@99b1cbd729bc83bf7fc74e1b2a97fffad3d65d7b # v3.1.1
-        with:
-          filenames: dist/*
-
-      - name: Upload signatures
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: dist-signatures
-          path: ${{ env.RELEASE_ASSETS }}/*.sig
-          if-no-files-found: error
-
   publish:
     name: Publish to PyPI
-    needs: [build, test-wheel, sign]
+    needs: [build, test-wheel]
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -163,37 +128,3 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
-
-  attach-release-assets:
-    name: Attach signatures to the release
-    needs: [sign, publish]
-    if: github.event_name == 'release'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: write # required to upload release assets
-    steps:
-      - name: Download distributions
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: dist
-          path: dist/
-
-      - name: Download signatures
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: dist-signatures
-          path: dist/
-
-      - name: Checksum the signed distributions
-        run: (cd dist && sha256sum -- *.whl *.tar.gz *.sig > SHA256SUMS)
-
-      - name: Upload distributions, signatures, and checksums to the release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }} # no checkout here, so gh can't infer it
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        # --clobber lets a rerun replace assets left by a partially failed upload.
-        run: >-
-          gh release upload --clobber "$RELEASE_TAG"
-          dist/*.whl dist/*.tar.gz dist/*.sig dist/SHA256SUMS
