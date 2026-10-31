@@ -136,8 +136,11 @@ class RunRepository:
         if limit is not None:
             pipeline.append({"$limit": limit})
         pipeline.append({"$unset": [*values, *ranks]})
-        with repository_operation("Unable to search runs."):
-            documents = list(self._collection.aggregate(pipeline))
+        with (
+            repository_operation("Unable to search runs."),
+            self._collection.aggregate(pipeline) as cursor,
+        ):
+            documents = list(cursor)
         return [RunRecord.from_document(document) for document in documents]
 
     @staticmethod

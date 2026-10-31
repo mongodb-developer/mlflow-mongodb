@@ -497,8 +497,9 @@ class ModelVersionRepository:
             ``True`` if the registered model exists and owns the specified
             non-deleted version; otherwise, ``False``.
         """
-        with repository_operation("Unable to check model-version existence."):
-            documents = self._registered_models_collection.aggregate(
+        with (
+            repository_operation("Unable to check model-version existence."),
+            self._registered_models_collection.aggregate(
                 [
                     {
                         "$match": {"name": registered_model_name},
@@ -526,7 +527,8 @@ class ModelVersionRepository:
                     {"$project": {"_id": True}},
                     {"$limit": 1},
                 ]
-            )
+            ) as documents,
+        ):
             document = next(documents, None)
         return document is not None
 
@@ -547,8 +549,9 @@ class ModelVersionRepository:
             :class:`ModelVersionRecord` for each requested stage, ordered by
             version number descending.
         """
-        with repository_operation("Unable to find latest by stages."):
-            documents = self._collection.aggregate(
+        with (
+            repository_operation("Unable to find latest by stages."),
+            self._collection.aggregate(
                 [
                     {
                         "$match": {
@@ -561,8 +564,9 @@ class ModelVersionRepository:
                     {"$replaceRoot": {"newRoot": "$record"}},
                     {"$sort": {"version": DESCENDING}},
                 ]
-            )
-            documents = list(documents)
+            ) as cursor,
+        ):
+            documents = list(cursor)
         return tuple(ModelVersionRecord.from_document(document) for document in documents)
 
     def search(
@@ -657,8 +661,11 @@ class ModelVersionRepository:
         # Fetch one extra record to determine whether another page exists.
         pipeline.append({"$limit": max_results + 1})
 
-        with repository_operation("Unable to search."):
-            documents = list(self._collection.aggregate(pipeline))
+        with (
+            repository_operation("Unable to search."),
+            self._collection.aggregate(pipeline) as cursor,
+        ):
+            documents = list(cursor)
         has_more = len(documents) > max_results
         records = tuple(
             ModelVersionSearchResult(
