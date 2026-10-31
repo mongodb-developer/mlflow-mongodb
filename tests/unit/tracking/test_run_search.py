@@ -256,6 +256,13 @@ def _repository_search(repository, **overrides):
     return repository.search(**arguments)
 
 
+def _search_cursor(documents):
+    cursor = MagicMock()
+    cursor.__enter__.return_value = cursor
+    cursor.__iter__.side_effect = lambda: iter(documents)
+    return cursor
+
+
 @pytest.mark.parametrize("error_type", [OperationFailure, InvalidDocument])
 def test_repository_search_translates_aggregate_failures(
     search_repository, search_collection, error_type
@@ -278,16 +285,18 @@ def test_repository_search_consumes_cursor_inside_error_boundary(
         yield run_document_factory()
         raise error
 
-    search_collection.aggregate.return_value = documents()
+    cursor = _search_cursor(documents())
+    search_collection.aggregate.return_value = cursor
     with pytest.raises(RepositoryPersistenceError) as caught:
         _repository_search(search_repository)
     assert caught.value.__cause__ is error
+    cursor.__exit__.assert_called_once()
 
 
 def test_repository_search_keeps_record_conversion_outside_error_boundary(
     search_repository, search_collection
 ):
-    search_collection.aggregate.return_value = [{}]
+    search_collection.aggregate.return_value = _search_cursor([{}])
     with pytest.raises(KeyError):
         _repository_search(search_repository)
 
@@ -296,7 +305,7 @@ def test_repository_search_does_not_modify_database_documents(
     search_repository, search_collection, run_document_factory
 ):
     document = run_document_factory(params=[{"k": "depth", "v": "3"}])
-    search_collection.aggregate.return_value = [document]
+    search_collection.aggregate.return_value = _search_cursor([document])
     record = _repository_search(search_repository)[0]
     assert record.params[0].value == "3"
     assert document["params"] == [{"k": "depth", "v": "3"}]

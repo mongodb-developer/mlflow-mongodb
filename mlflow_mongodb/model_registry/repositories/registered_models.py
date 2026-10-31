@@ -304,14 +304,16 @@ class RegisteredModelRepository:
             :class:`ModelVersionRecord` objects, or ``None`` if no registered
             model has the specified name.
         """
-        with repository_operation("Unable to find by name with latest versions."):
-            documents = self._collection.aggregate(
+        with (
+            repository_operation("Unable to find by name with latest versions."),
+            self._collection.aggregate(
                 [
                     {"$match": {"name": name}},
                     {"$limit": 1},
                     self._latest_versions_lookup_stage(stages=stages),
                 ],
-            )
+            ) as documents,
+        ):
             document = next(documents, None)
         return self._to_details(document) if document is not None else None
 
@@ -328,14 +330,16 @@ class RegisteredModelRepository:
             The registered model and its latest :class:`ModelVersionRecord`,
             or ``None`` if no registered model has the specified name.
         """
-        with repository_operation("Unable to find latest version by name."):
-            documents = self._collection.aggregate(
+        with (
+            repository_operation("Unable to find latest version by name."),
+            self._collection.aggregate(
                 [
                     {"$match": {"name": name}},
                     {"$limit": 1},
                     self._latest_version_lookup_stage(),
                 ],
-            )
+            ) as documents,
+        ):
             document = next(documents, None)
         return self._to_details(document) if document is not None else None
 
@@ -554,8 +558,11 @@ class RegisteredModelRepository:
                 self._latest_versions_lookup_stage(),
             ]
         )
-        with repository_operation("Unable to search."):
-            documents = list(self._collection.aggregate(pipeline))
+        with (
+            repository_operation("Unable to search."),
+            self._collection.aggregate(pipeline) as cursor,
+        ):
+            documents = list(cursor)
         records = tuple(self._to_details(document) for document in documents[:max_results])
         return RegisteredModelPage(records=records, has_more=len(documents) > max_results)
 
