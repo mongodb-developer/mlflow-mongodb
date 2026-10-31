@@ -17,6 +17,9 @@ from mlflow_mongodb.model_registry.store import MongoDBModelRegistryStore
 SUPPORTS_MODEL_NAME_LIST_FILTERS = "name" in getattr(
     SearchModelVersionUtils, "LIST_SUPPORTED_KEYS", ()
 )
+SUPPORTS_MODEL_VERSION_NOT_IN = (
+    "NOT IN" in SearchModelVersionUtils.VALID_STRING_ATTRIBUTE_COMPARATORS
+)
 
 
 @pytest.mark.parametrize(
@@ -69,6 +72,24 @@ def test_parse_registered_model_filters_adds_prompt_exclusion(
         (
             "run_id IN ('run-a', 'run-b')",
             ModelVersionFilter("attribute", "run_id", "IN", ("run-a", "run-b")),
+        ),
+        pytest.param(
+            "name NOT IN ('fraud', 'credit')",
+            ModelVersionFilter("attribute", "name", "NOT IN", ("fraud", "credit")),
+            marks=pytest.mark.skipif(
+                not (SUPPORTS_MODEL_NAME_LIST_FILTERS and SUPPORTS_MODEL_VERSION_NOT_IN),
+                reason="The installed MLflow does not support model-name NOT IN filters",
+            ),
+            id="name-not-in",
+        ),
+        pytest.param(
+            "run_id NOT IN ('run-a', 'run-b')",
+            ModelVersionFilter("attribute", "run_id", "NOT IN", ("run-a", "run-b")),
+            marks=pytest.mark.skipif(
+                not SUPPORTS_MODEL_VERSION_NOT_IN,
+                reason="The installed MLflow does not support model-version NOT IN filters",
+            ),
+            id="run-id-not-in",
         ),
         (
             "version_number >= 2",

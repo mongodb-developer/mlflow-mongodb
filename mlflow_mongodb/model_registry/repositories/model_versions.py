@@ -740,11 +740,10 @@ class ModelVersionRepository:
         value: str | int | float | tuple[str, ...],
     ) -> dict[str, Any]:
         condition = cls._build_value_condition(comparator, value)
-        if comparator != "!=":
+        if comparator not in ("!=", "NOT IN"):
             return {field: condition}
 
-        # SQL comparisons against NULL are unknown rather than true. MongoDB's `$ne` also matches
-        # a missing field, so explicitly require a stored, non-null value for equivalent behavior.
+        # Exclude null and missing fields from negative comparisons.
         return {
             "$and": [
                 {field: {"$exists": True}},
@@ -758,7 +757,7 @@ class ModelVersionRepository:
         comparator: str,
         value: str | int | float | tuple[str, ...],
     ):
-        if comparator not in ("=", "!=", "IN", ">", ">=", "<", "<=", "LIKE", "ILIKE"):
+        if comparator not in ("=", "!=", "IN", "NOT IN", ">", ">=", "<", "<=", "LIKE", "ILIKE"):
             raise ValueError(f"Unsupported model-version comparator: {comparator}")
 
         return build_value_condition(comparator, value)

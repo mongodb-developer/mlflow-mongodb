@@ -6,7 +6,7 @@ from mlflow.entities.model_registry import (
     ModelVersionTag,
     RegisteredModelTag,
 )
-from mlflow.utils.search_utils import SearchModelVersionUtils
+from mlflow.utils.search_utils import SearchModelUtils, SearchModelVersionUtils
 
 from mlflow_mongodb.model_registry.repositories import (
     ModelVersionFilter,
@@ -19,6 +19,36 @@ from mlflow_mongodb.model_registry.store import MongoDBModelRegistryStore
 SUPPORTS_MODEL_NAME_LIST_FILTERS = "name" in getattr(
     SearchModelVersionUtils, "LIST_SUPPORTED_KEYS", ()
 )
+SUPPORTS_REGISTERED_MODEL_NAME_LIST_FILTERS = "name" in getattr(
+    SearchModelUtils, "LIST_SUPPORTED_KEYS", ()
+)
+
+
+@pytest.mark.skipif(
+    not SUPPORTS_REGISTERED_MODEL_NAME_LIST_FILTERS,
+    reason="MLflow's registered-model parser does not support name list filters.",
+)
+@pytest.mark.parametrize(
+    ("filter_string", "expected_names"),
+    [
+        ("name IN ('alpha-model', 'gamma-model')", ["alpha-model", "gamma-model"]),
+        ("name NOT IN ('alpha-model', 'gamma-model')", ["beta-model"]),
+        ("name IN ('missing-model')", []),
+        ("name NOT IN ('missing-model')", ["alpha-model", "beta-model", "gamma-model"]),
+        ("name IN ('ALPHA-model')", []),
+        ("name NOT IN ('ALPHA-model')", ["alpha-model", "beta-model", "gamma-model"]),
+    ],
+)
+def test_search_registered_models_supports_name_list_filters(
+    store: MongoDBModelRegistryStore, filter_string, expected_names
+):
+    for name in ("alpha-model", "beta-model", "gamma-model"):
+        store.create_registered_model(name)
+    store.create_prompt("prompt-model")
+
+    models = store.search_registered_models(filter_string, order_by=["name ASC"])
+
+    assert [model.name for model in models] == expected_names
 
 
 def _search_model_version_numbers(store, filter_string):
@@ -32,9 +62,9 @@ def test_model_version_repository_rejects_unsupported_comparator(
     store.create_registered_model(name)
     store.create_model_version(name, "models/unsupported-comparator", run_id="excluded-run")
 
-    with pytest.raises(ValueError, match="^Unsupported model-version comparator: NOT IN$"):
+    with pytest.raises(ValueError, match="^Unsupported model-version comparator: RLIKE$"):
         store._model_version_repository.search(
-            filters=(ModelVersionFilter("attribute", "run_id", "NOT IN", ("excluded-run",)),),
+            filters=(ModelVersionFilter("attribute", "run_id", "RLIKE", "excluded-run"),),
             order_by=(ModelVersionOrder("version_number", True),),
             exclude_prompts=True,
             offset=0,
@@ -120,8 +150,22 @@ def test_search_model_versions_supports_name_list_filters(store: MongoDBModelReg
     assert store.search_model_versions("name IN ('missing-model')") == []
 
 
+@pytest.mark.parametrize(
+    "run_filter",
+    [
+        "run_id != 'excluded-run'",
+        pytest.param(
+            "run_id NOT IN ('excluded-run')",
+            marks=pytest.mark.skipif(
+                "NOT IN" not in SearchModelVersionUtils.VALID_STRING_ATTRIBUTE_COMPARATORS,
+                reason="The installed MLflow does not support model-version NOT IN filters",
+            ),
+        ),
+    ],
+)
 def test_search_model_versions_attribute_inequality_excludes_null_and_missing_values(
     store: MongoDBModelRegistryStore,
+    run_filter,
 ):
     name = "search-model-version-attribute-inequality"
     store.create_registered_model(name)
@@ -143,9 +187,9 @@ def test_search_model_versions_attribute_inequality_excludes_null_and_missing_va
     assert _search_model_version_numbers(store, f"name = '{name}'") == {
         version.version for version in versions.values()
     }
-    assert _search_model_version_numbers(
-        store, f"name = '{name}' AND run_id != 'excluded-run'"
-    ) == {versions["different"].version}
+    assert _search_model_version_numbers(store, f"name = '{name}' AND {run_filter}") == {
+        versions["different"].version
+    }
 
 
 def test_search_model_versions_reflects_model_version_changes(

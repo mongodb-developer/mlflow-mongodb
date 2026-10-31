@@ -316,7 +316,11 @@ class MongoDBModelRegistryStore(AbstractStore):
                     field_type=clause.field_type,
                     key=clause.key,
                     comparator=clause.comparator,
-                    value=clause.value,
+                    value=(
+                        tuple(clause.value)
+                        if clause.comparator in ("IN", "NOT IN")
+                        else clause.value
+                    ),
                 )
             )
         return tuple(filters)
@@ -362,8 +366,9 @@ class MongoDBModelRegistryStore(AbstractStore):
             field_types=("attribute", "tag"),
             attribute_keys=SearchModelVersionUtils.VALID_SEARCH_ATTRIBUTE_KEYS,
             comparators={
-                # MLflow supports IN only for name and run_id, not other model-version attributes.
-                "attribute": SearchModelVersionUtils.VALID_STRING_ATTRIBUTE_COMPARATORS - {"IN"},
+                # List comparisons apply only to name and run_id.
+                "attribute": SearchModelVersionUtils.VALID_STRING_ATTRIBUTE_COMPARATORS
+                - {"IN", "NOT IN"},
                 "tag": SearchModelVersionUtils.VALID_TAG_COMPARATORS,
             },
             field_comparators={
@@ -421,7 +426,7 @@ class MongoDBModelRegistryStore(AbstractStore):
                     clause.comparator == "!=" and value.lower() == "false"
                 )
 
-            if clause.comparator == "IN":
+            if clause.comparator in ("IN", "NOT IN"):
                 value = tuple(value)
             filters.append(
                 ModelVersionFilter(

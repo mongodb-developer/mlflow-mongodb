@@ -35,8 +35,8 @@ class RegisteredModelFilter:
 
     field_type: Literal["attribute", "tag"]
     key: str
-    comparator: Literal["=", "!=", "LIKE", "ILIKE"]
-    value: str
+    comparator: Literal["=", "!=", "LIKE", "ILIKE", "IN", "NOT IN"]
+    value: str | tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -680,8 +680,8 @@ class RegisteredModelRepository:
         }
 
     @staticmethod
-    def _build_value_condition(comparator: str, value: str):
-        if comparator not in ("=", "!=", "LIKE", "ILIKE"):
+    def _build_value_condition(comparator: str, value: str | tuple[str, ...]):
+        if comparator not in ("=", "!=", "LIKE", "ILIKE", "IN", "NOT IN"):
             raise ValueError(f"Unsupported registered-model comparator: {comparator}")
 
         return build_value_condition(comparator, value)
