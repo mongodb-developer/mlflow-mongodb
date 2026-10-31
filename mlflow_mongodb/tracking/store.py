@@ -1362,22 +1362,31 @@ class MongoDBTrackingStore(AbstractStore):
         documents_by_trace: defaultdict[str, list[dict[str, Any]]],
         batch_tags: dict[str, dict[str, str]],
     ) -> None:
-        try:
-            for trace_id in documents_by_trace:
+        first_error = None
+        for trace_id in documents_by_trace:
+            try:
                 self._refresh_trace_span_summary(trace_id, experiment_id, batch_tags[trace_id])
-        except RepositoryNotFoundError as exc:
-            logger.error("Unable to refresh trace span summaries: %s", exc)
-            raise MlflowException(
-                f"Trace '{exc.resource_id}' was deleted during span ingestion.",
-                RESOURCE_DOES_NOT_EXIST,
-            ) from None
-        except RepositoryWriteConflictError as exc:
-            logger.error("Unable to refresh trace span summaries: %s", exc)
-            raise MlflowException(
-                f"Concurrent span writes prevented refreshing trace '{exc.resource_id}'. "
-                "Retry log_spans to refresh its summary; stored spans are deduplicated.",
-                TEMPORARILY_UNAVAILABLE,
-            ) from None
+            except RepositoryNotFoundError as exc:
+                logger.error("Unable to refresh trace span summaries: %s", exc)
+                if first_error is None:
+                    first_error = MlflowException(
+                        f"Trace '{exc.resource_id}' was deleted during span ingestion.",
+                        RESOURCE_DOES_NOT_EXIST,
+                    )
+            except RepositoryWriteConflictError as exc:
+                logger.error("Unable to refresh trace span summaries: %s", exc)
+                if first_error is None:
+                    first_error = MlflowException(
+                        f"Concurrent span writes prevented refreshing trace '{exc.resource_id}'. "
+                        "Retry log_spans to refresh its summary; stored spans are deduplicated.",
+                        TEMPORARILY_UNAVAILABLE,
+                    )
+            except MlflowException as exc:
+                # Persistence failures have already been logged and translated.
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error from None
 
     @staticmethod
     def _span_attribute_value(value: Any) -> Any:
@@ -1570,6 +1579,7 @@ class MongoDBTrackingStore(AbstractStore):
         }
         return list(documents_by_identity.values()), documents_by_trace, batch_tags
 
+    @handle_persistence_error("Unable to log spans.", logger=logger)
     @retry_on_exception(RepositoryWriteConflictError, attempts=3, backoff_seconds=(0.01, 0.05))
     def _refresh_trace_span_summary(
         self, trace_id: str, experiment_id: str, batch_tags: dict[str, str]
