@@ -20,6 +20,7 @@ from mlflow.protos.databricks_pb2 import (
 
 import mlflow_mongodb.tracking.store as tracking_store
 from mlflow_mongodb.infrastructure.errors import (
+    RepositoryAlreadyExistsError,
     RepositoryNotFoundError,
     RepositoryPersistenceError,
     RepositoryTagNotFoundError,
@@ -28,6 +29,127 @@ from mlflow_mongodb.tracking.types import RunMetricRecord
 
 MODEL_ID = f"m-{UUID(int=42).hex}"
 TIMESTAMP = 1_700_000_000_000
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [[], [("depth", "3"), ("team.name", "$risk")], [("", "")]],
+)
+def test_log_params_passes_new_entries_without_mutating_input(
+    logged_model_store, logged_model_repository, entries
+):
+    params = [LoggedModelParameter(key, value) for key, value in entries]
+
+    assert logged_model_store.log_logged_model_params(MODEL_ID, params) is None
+
+    logged_model_repository.log_params.assert_called_once_with(
+        model_id=MODEL_ID, params=dict(entries)
+    )
+    logged_model_repository.find_by_id.assert_not_called()
+    assert [(param.key, param.value) for param in params] == entries
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        [("depth", "3"), ("depth", "3")],
+        [("depth", "3"), ("depth", "4")],
+        [(None, "3")],
+        [("depth", None)],
+    ],
+)
+def test_log_params_rejects_invalid_entries_without_writing(
+    logged_model_store, logged_model_repository, entries
+):
+    params = [LoggedModelParameter(key, value) for key, value in entries]
+
+    with pytest.raises(MlflowException) as caught:
+        logged_model_store.log_logged_model_params(MODEL_ID, params)
+
+    assert caught.value.error_code == ErrorCode.Name(BAD_REQUEST)
+    logged_model_repository.find_by_id.assert_called_once_with(MODEL_ID)
+    logged_model_repository.log_params.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        [("depth", "3"), ("depth", "4")],
+        [(None, "3")],
+        [("depth", None)],
+    ],
+)
+def test_log_params_missing_model_precedes_invalid_entries(
+    logged_model_store, logged_model_repository, entries
+):
+    logged_model_repository.find_by_id.return_value = None
+    params = [LoggedModelParameter(key, value) for key, value in entries]
+
+    with pytest.raises(MlflowException) as caught:
+        logged_model_store.log_logged_model_params(MODEL_ID, params)
+
+    assert caught.value.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST)
+    assert caught.value.message == f"Logged model with ID '{MODEL_ID}' not found."
+    logged_model_repository.find_by_id.assert_called_once_with(MODEL_ID)
+    logged_model_repository.log_params.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "error,code,message",
+    [
+        (
+            RepositoryNotFoundError("private"),
+            RESOURCE_DOES_NOT_EXIST,
+            f"Logged model with ID '{MODEL_ID}' not found.",
+        ),
+        (
+            RepositoryAlreadyExistsError("private"),
+            BAD_REQUEST,
+            "Logged model parameters cannot reuse existing keys.",
+        ),
+        (
+            RepositoryPersistenceError("Private URI and query"),
+            INTERNAL_ERROR,
+            "Unable to log logged model parameters.",
+        ),
+    ],
+)
+def test_log_params_translates_and_logs_repository_errors_once(
+    logged_model_store, logged_model_repository, caplog, error, code, message
+):
+    logged_model_repository.log_params.side_effect = error
+
+    with pytest.raises(MlflowException) as caught:
+        logged_model_store.log_logged_model_params(MODEL_ID, [LoggedModelParameter("depth", "3")])
+
+    assert caught.value.error_code == ErrorCode.Name(code)
+    assert caught.value.message == message
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True
+    records = [record for record in caplog.records if record.name == tracking_store.logger.name]
+    assert len(records) == 1
+    assert records[0].args == (error,)
+    assert records[0].exc_info is None
+
+
+def test_log_params_translates_lookup_persistence_failure_before_invalid_entries(
+    logged_model_store, logged_model_repository, caplog
+):
+    failure = RepositoryPersistenceError("Private URI and query")
+    logged_model_repository.find_by_id.side_effect = failure
+
+    with pytest.raises(MlflowException) as caught:
+        logged_model_store.log_logged_model_params(MODEL_ID, [LoggedModelParameter("depth", None)])
+
+    assert caught.value.error_code == ErrorCode.Name(INTERNAL_ERROR)
+    assert caught.value.message == "Unable to log logged model parameters."
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True
+    records = [record for record in caplog.records if record.name == tracking_store.logger.name]
+    assert len(records) == 1
+    assert records[0].args == (failure,)
+    assert records[0].exc_info is None
+    logged_model_repository.log_params.assert_not_called()
 
 
 def test_finalize_translates_missing_model(logged_model_store, logged_model_repository):
