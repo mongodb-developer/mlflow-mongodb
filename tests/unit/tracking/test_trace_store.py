@@ -631,6 +631,78 @@ def test_ingestion_summary_domain_errors_have_distinct_public_codes(
     assert caught.value.__suppress_context__ is True
 
 
+@pytest.mark.parametrize(
+    "first_error,code,message",
+    [
+        (
+            RepositoryNotFoundError(TRACE_ID),
+            RESOURCE_DOES_NOT_EXIST,
+            f"Trace '{TRACE_ID}' was deleted during span ingestion.",
+        ),
+        (
+            RepositoryWriteConflictError(TRACE_ID),
+            TEMPORARILY_UNAVAILABLE,
+            f"Concurrent span writes prevented refreshing trace '{TRACE_ID}'. "
+            "Retry log_spans to refresh its summary; stored spans are deduplicated.",
+        ),
+    ],
+)
+def test_summary_batch_continues_after_domain_failures_and_reports_first_error(
+    trace_store, span_factory, monkeypatch, caplog, first_error, code, message
+):
+    trace_ids = [TRACE_ID, "second", "third"]
+    later_error = RepositoryNotFoundError("second")
+    refresh = Mock(side_effect=[first_error, later_error, None])
+    monkeypatch.setattr(trace_store, "_refresh_trace_span_summary", refresh)
+    spans = [span_factory(trace_id=trace_id) for trace_id in trace_ids]
+
+    with pytest.raises(MlflowException) as caught:
+        trace_store.log_spans("42", spans)
+
+    assert refresh.call_args_list == [call(trace_id, "42", {}) for trace_id in trace_ids]
+    assert caught.value.error_code == ErrorCode.Name(code)
+    assert caught.value.message == message
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True
+    records = [record for record in caplog.records if record.name == store_module.logger.name]
+    assert [record.args for record in records] == [(first_error,), (later_error,)]
+    assert all(record.exc_info is None for record in records)
+
+
+def test_summary_batch_continues_after_persistence_failure_without_logging_twice(
+    trace_store, trace_repository, span_factory, caplog
+):
+    trace_ids = [TRACE_ID, "second", "third"]
+    spans = [span_factory(trace_id=trace_id) for trace_id in trace_ids]
+    summaries = [
+        SpanSummaryRecord.from_document(trace_store._span_to_document(span)) for span in spans
+    ]
+    failure = RepositoryPersistenceError("Private URI and query")
+    trace_repository.span_summary_snapshot.side_effect = [
+        failure,
+        (1, [summaries[1]]),
+        (1, [summaries[2]]),
+    ]
+
+    with pytest.raises(MlflowException) as caught:
+        trace_store.log_spans("42", spans)
+
+    assert trace_repository.span_summary_snapshot.call_args_list == [
+        call(trace_id=trace_id, experiment_id="42") for trace_id in trace_ids
+    ]
+    assert [
+        update.kwargs["trace_id"] for update in trace_repository.update_span_summary.call_args_list
+    ] == ["second", "third"]
+    assert caught.value.error_code == ErrorCode.Name(INTERNAL_ERROR)
+    assert caught.value.message == "Unable to log spans."
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True
+    records = [record for record in caplog.records if record.name == store_module.logger.name]
+    assert len(records) == 1
+    assert records[0].args == (failure,)
+    assert records[0].exc_info is None
+
+
 def test_async_span_ingestion_delegates_to_sync_store(trace_store, span_factory, monkeypatch):
     spans = [span_factory()]
     log_spans = Mock(return_value=spans)
