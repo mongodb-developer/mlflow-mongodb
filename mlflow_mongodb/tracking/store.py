@@ -2494,6 +2494,34 @@ class MongoDBTrackingStore(AbstractStore):
 
         return self._to_logged_model(record, metrics)
 
+    @handle_persistence_error("Unable to log logged model parameters.", logger=logger)
+    def log_logged_model_params(self, model_id: str, params: list[LoggedModelParameter]) -> None:
+        """Add new model parameters without replacing existing keys."""
+        params_by_key = {param.key: param.value for param in params}
+        if len(params_by_key) != len(params) or any(
+            key is None or value is None for key, value in params_by_key.items()
+        ):
+            if self._logged_model_repository.find_by_id(model_id) is None:
+                raise MlflowException(
+                    f"Logged model with ID '{model_id}' not found.", RESOURCE_DOES_NOT_EXIST
+                )
+            raise MlflowException(
+                "Logged model parameters must have unique, non-null keys and non-null values.",
+                BAD_REQUEST,
+            )
+        try:
+            self._logged_model_repository.log_params(model_id=model_id, params=params_by_key)
+        except RepositoryNotFoundError as exc:
+            logger.error("Unable to log logged model parameters: %s", exc)
+            raise MlflowException(
+                f"Logged model with ID '{model_id}' not found.", RESOURCE_DOES_NOT_EXIST
+            ) from None
+        except RepositoryAlreadyExistsError as exc:
+            logger.error("Unable to log logged model parameters: %s", exc)
+            raise MlflowException(
+                "Logged model parameters cannot reuse existing keys.", BAD_REQUEST
+            ) from None
+
     @handle_persistence_error("Unable to finalize logged model.", logger=logger)
     def finalize_logged_model(self, model_id: str, status: LoggedModelStatus) -> LoggedModel:
         try:

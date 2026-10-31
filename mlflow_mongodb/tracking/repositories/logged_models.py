@@ -14,6 +14,7 @@ from mlflow_mongodb.infrastructure.array_operations import (
     build_remove_array_element_update,
 )
 from mlflow_mongodb.infrastructure.errors import (
+    RepositoryAlreadyExistsError,
     RepositoryNotFoundError,
     RepositoryTagNotFoundError,
 )
@@ -179,6 +180,44 @@ class LoggedModelRepository:
         # A repeated deletion in the same millisecond can match without modifying.
         if result.matched_count == 0:
             raise RepositoryNotFoundError(model_id)
+
+    def log_params(self, *, model_id: str, params: Mapping[str, str]) -> None:
+        """Append new parameter keys atomically, rejecting any existing key."""
+        entries = [{"k": key, "v": value} for key, value in params.items()]
+        overlapping_keys = {
+            "$setIntersection": [
+                {"$ifNull": ["$params.k", []]},
+                {"$literal": list(params)},
+            ]
+        }
+        with repository_operation("Unable to log logged model parameters."):
+            previous = self._collection.find_one_and_update(
+                {"_id": model_id},
+                [
+                    {
+                        "$set": {
+                            "params": {
+                                "$cond": [
+                                    {"$eq": [{"$size": overlapping_keys}, 0]},
+                                    {
+                                        "$concatArrays": [
+                                            {"$ifNull": ["$params", []]},
+                                            {"$literal": entries},
+                                        ]
+                                    },
+                                    "$params",
+                                ]
+                            }
+                        }
+                    }
+                ],
+                projection={"_id": 0, "params.k": 1},
+                return_document=ReturnDocument.BEFORE,
+            )
+        if previous is None:
+            raise RepositoryNotFoundError(model_id)
+        if any(parameter["k"] in params for parameter in previous.get("params", [])):
+            raise RepositoryAlreadyExistsError(model_id)
 
     def set_tags(self, *, model_id: str, tags: Mapping[str, str]) -> None:
         """Merge tags and check model existence in one update, including empty batches."""
