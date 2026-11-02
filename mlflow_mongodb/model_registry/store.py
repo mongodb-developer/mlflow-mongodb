@@ -31,6 +31,7 @@ from mlflow.protos.databricks_pb2 import (
     INVALID_PARAMETER_VALUE,
     RESOURCE_ALREADY_EXISTS,
     RESOURCE_DOES_NOT_EXIST,
+    ErrorCode,
 )
 from mlflow.store.artifact.utils.models import _parse_model_uri
 from mlflow.store.entities.paged_list import PagedList
@@ -41,13 +42,10 @@ from mlflow.store.model_registry import (
     SEARCH_REGISTERED_MODEL_MAX_RESULTS_THRESHOLD,
 )
 from mlflow.store.model_registry.abstract_store import AbstractStore
-<<<<<<< HEAD
-=======
 from mlflow.tracing.utils.prompt import update_linked_prompts_tag
 from mlflow.tracking._tracking_service.utils import (
     _get_store as get_tracking_store,
 )
->>>>>>> b76feec (Validate link endpoints and respect configured tracking stores)
 from mlflow.tracking._tracking_service.utils import (
     _resolve_tracking_uri as resolve_tracking_uri,
 )
@@ -76,13 +74,10 @@ from mlflow_mongodb.infrastructure.errors import (
     RepositoryUnsupportedComparatorError,
     RepositoryUnsupportedFieldTypeError,
     redact_uri,
-<<<<<<< HEAD
-=======
 )
 from mlflow_mongodb.infrastructure.prompt_links import (
     LINKED_PROMPTS_TAG_KEY,
     resolve_prompt_versions,
->>>>>>> b76feec (Validate link endpoints and respect configured tracking stores)
 )
 from mlflow_mongodb.infrastructure.search_filters import (
     ConfiguredSearchFilterValidator,
@@ -217,7 +212,17 @@ class MongoDBModelRegistryStore(AbstractStore):
             if link_prompts is not None:
                 # Older tracking stores expose prompt associations only as tags.
                 with suppress(NotImplementedError):
-                    link_prompts(trace_id, prompts)
+                    try:
+                        link_prompts(trace_id, prompts)
+                    except MlflowException as exc:
+                        # FileStore reports unsupported native links as a validation error.
+                        if not (
+                            exc.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
+                            and exc.message.startswith(
+                                "Linking prompts to traces is not supported in FileStore."
+                            )
+                        ):
+                            raise
             if updated != current:
                 tracking_store.set_trace_tag(trace_id, LINKED_PROMPTS_TAG_KEY, updated)
 

@@ -249,6 +249,39 @@ def test_models_and_prompts_cannot_reuse_each_others_names(
         store.create_registered_model("name-owned-by-prompt")
 
 
+def test_prompt_trace_link_preserves_tag_fallback_with_filestore(
+    store, mongodb_uri, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("MLFLOW_ALLOW_FILE_STORE", "true")
+    tracking_uri = (tmp_path / "file-tracking").as_uri()
+    tracking = _get_store(store_uri=tracking_uri)
+    experiment_id = tracking.create_experiment("file-traces")
+    trace_id = f"tr-{uuid4().hex}"
+    tracking.start_trace(
+        TraceInfo(
+            trace_id=trace_id,
+            trace_location=TraceLocation.from_experiment_id(experiment_id),
+            request_time=1_700_000_000_000,
+            state=TraceState.OK,
+            execution_duration=10,
+            tags={"team": "risk"},
+        )
+    )
+    registry = MongoDBModelRegistryStore(store_uri=mongodb_uri, tracking_uri=tracking_uri)
+    registry.__dict__["_mongo_client"] = store._mongo_client
+    registry.create_prompt("file-linked-prompt")
+    prompt = registry.create_prompt_version("file-linked-prompt", "Hello {{name}}")
+
+    registry.link_prompts_to_trace([prompt], trace_id)
+    registry.link_prompts_to_trace([prompt], trace_id)
+
+    tags = tracking.get_trace_info(trace_id).tags
+    assert json.loads(tags[LINKED_PROMPTS_TAG_KEY]) == [
+        {"name": prompt.name, "version": str(prompt.version)}
+    ]
+    assert tags["team"] == "risk"
+
+
 def test_prompt_run_link_uses_global_tracking_uri(store, mongodb_uri, tmp_path):
     registry = MongoDBModelRegistryStore(store_uri=mongodb_uri, tracking_uri=mongodb_uri)
     registry.__dict__["_mongo_client"] = store._mongo_client

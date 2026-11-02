@@ -1,9 +1,12 @@
 """Unit tests for the MLflow prompt API backed by the MongoDB registry store."""
 
+from unittest.mock import Mock
+
 import pytest
 from mlflow.entities.model_registry import PromptVersion
 from mlflow.exceptions import MlflowException
 from mlflow.prompt.constants import IS_PROMPT_TAG_KEY, PROMPT_TEXT_TAG_KEY
+from mlflow.protos.databricks_pb2 import INTERNAL_ERROR, INVALID_PARAMETER_VALUE
 from mlflow.tracking.registry import UnsupportedModelRegistryStoreURIException
 
 from mlflow_mongodb.infrastructure.errors import (
@@ -17,6 +20,32 @@ PROMPT_DESCRIPTION = "Prompt used by the support assistant"
 PROMPT_TAGS = {"team": "support", "environment": "test"}
 VERSION_DESCRIPTION = "Initial prompt wording"
 VERSION_TAGS = {"author": "Ada"}
+
+
+@pytest.mark.parametrize(
+    "message,error_code",
+    [
+        ("Invalid prompt reference.", INVALID_PARAMETER_VALUE),
+        ("Unable to persist prompt associations.", INTERNAL_ERROR),
+        ("Linking prompts to traces is not supported in FileStore.", INTERNAL_ERROR),
+    ],
+)
+def test_prompt_trace_link_does_not_hide_validation_or_persistence_errors(
+    store, monkeypatch, message, error_code
+):
+    prompt = PromptVersion(name=PROMPT_NAME, version=1, template=PROMPT_TEMPLATE)
+    monkeypatch.setattr(store, "get_prompt_version", Mock(return_value=prompt))
+    tracking = Mock(spec=["get_trace_info", "link_prompts_to_trace", "set_trace_tag"])
+    tracking.get_trace_info.return_value.tags = {}
+    failure = MlflowException(message, error_code)
+    tracking.link_prompts_to_trace.side_effect = failure
+    store.__dict__["_tracking_store"] = tracking
+
+    with pytest.raises(MlflowException) as caught:
+        store.link_prompts_to_trace([prompt], "tr-existing")
+
+    assert caught.value is failure
+    tracking.set_trace_tag.assert_not_called()
 
 
 def test_prompt_link_tracking_resolution_does_not_expose_uri_credentials(
