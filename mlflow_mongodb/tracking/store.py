@@ -915,6 +915,37 @@ class MongoDBTrackingStore(AbstractStore):
             return math.copysign(sys.float_info.max, value)
         return value
 
+    def _validate_metric_model_references(
+        self, run_id: str, metrics: list[Metric], params: list[Param]
+    ) -> None:
+        model_ids = list(
+            dict.fromkeys(metric.model_id for metric in metrics if metric.model_id is not None)
+        )
+        if not model_ids:
+            return
+
+        # Preserve run and parameter validation precedence before checking references.
+        # The repository repeats these checks atomically when applying the batch.
+        run = self._run_repository.find_by_id(run_id)
+        if run is None:
+            raise RepositoryNotFoundError(run_id)
+        if run.lifecycle_stage != LifecycleStage.ACTIVE:
+            raise RepositoryNotActiveError(run_id, run.lifecycle_stage)
+        existing_params = {param.key: param.value for param in run.params}
+        for param in params:
+            if param.key in existing_params and existing_params[param.key] != param.value:
+                raise RepositoryParamConflictError(
+                    param.key, existing_params[param.key], param.value, run_id
+                )
+
+        existing_ids = self._logged_model_repository.find_existing_ids(model_ids)
+        for model_id in model_ids:
+            if model_id not in existing_ids:
+                raise MlflowException(
+                    f"Unable to log metrics: logged model with ID '{model_id}' not found.",
+                    INTERNAL_ERROR,
+                )
+
     @handle_persistence_error("Unable to log run batch.", logger=logger)
     def log_batch(
         self, run_id: str, metrics: list[Metric], params: list[Param], tags: list[RunTag]
@@ -925,6 +956,7 @@ class MongoDBTrackingStore(AbstractStore):
         _validate_param_keys_unique(params)
 
         try:
+            self._validate_metric_model_references(run_id, metrics, params)
             self._run_repository.log_batch(
                 run_id=run_id,
                 metrics=[

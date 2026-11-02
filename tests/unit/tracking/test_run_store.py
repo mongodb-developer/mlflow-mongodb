@@ -196,13 +196,17 @@ def test_update_run_info_converts_status_and_returned_record(
     run_repository.find_by_id.assert_not_called()
 
 
-def test_batch_encodes_metric_identity_and_key_value_entries(run_store, run_repository):
+def test_batch_encodes_metric_identity_and_key_value_entries(
+    run_store, run_repository, logged_model_repository
+):
+    logged_model_repository.find_existing_ids.return_value = {"m-model"}
     metric = Metric(
         "loss", 0.4, TIMESTAMP, 2, model_id="m-model", dataset_name="training", dataset_digest="abc"
     )
 
     run_store.log_batch(RUN_ID, [metric], [Param("depth", "3")], [RunTag("team", "$risk")])
 
+    logged_model_repository.find_existing_ids.assert_called_once_with(["m-model"])
     run_repository.log_batch.assert_called_once_with(
         run_id=RUN_ID,
         metrics=[
@@ -226,6 +230,125 @@ def test_duplicate_param_keys_are_rejected_before_batch_persistence(run_store, r
         run_store.log_batch(RUN_ID, [], [Param("depth", "3"), Param("depth", "4")], [])
 
     assert caught.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
+    run_repository.log_batch.assert_not_called()
+
+
+def test_model_metric_references_are_queried_once_per_distinct_id(
+    run_store, run_repository, logged_model_repository
+):
+    logged_model_repository.find_existing_ids.return_value = {"m-first", "m-second"}
+    metrics = [
+        Metric("plain", 1, TIMESTAMP, 0),
+        Metric("loss", 2, TIMESTAMP, 0, model_id="m-first"),
+        Metric("accuracy", 3, TIMESTAMP, 0, model_id="m-first"),
+        Metric("loss", 4, TIMESTAMP, 0, model_id="m-second"),
+    ]
+
+    run_store.log_batch(RUN_ID, metrics, [], [])
+
+    logged_model_repository.find_existing_ids.assert_called_once_with(["m-first", "m-second"])
+    run_repository.log_batch.assert_called_once()
+
+
+@pytest.mark.parametrize("metrics", [[], [Metric("loss", 1, TIMESTAMP, 0)]])
+def test_batches_without_model_references_skip_preflight_reads(
+    run_store, run_repository, logged_model_repository, metrics
+):
+    run_store.log_batch(RUN_ID, metrics, [], [])
+
+    run_repository.find_by_id.assert_not_called()
+    logged_model_repository.find_existing_ids.assert_not_called()
+    run_repository.log_batch.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "model_ids",
+    [("m-missing", "m-existing"), ("m-existing", "m-missing"), ("m-missing", "m-missing")],
+)
+def test_missing_metric_model_rejects_batch_before_any_write(
+    run_store, run_repository, logged_model_repository, model_ids
+):
+    logged_model_repository.find_existing_ids.return_value = {"m-existing"}
+    metrics = [
+        Metric("loss", 1, TIMESTAMP, step, model_id=model_id)
+        for step, model_id in enumerate(model_ids)
+    ]
+
+    with pytest.raises(MlflowException) as caught:
+        run_store.log_batch(RUN_ID, metrics, [Param("new", "value")], [RunTag("new", "value")])
+
+    assert caught.value.error_code == ErrorCode.Name(INTERNAL_ERROR)
+    assert (
+        caught.value.message == "Unable to log metrics: logged model with ID 'm-missing' not found."
+    )
+    assert caught.value.__cause__ is None
+    run_repository.log_batch.assert_not_called()
+
+
+def test_missing_run_takes_precedence_over_missing_metric_model(
+    run_store, run_repository, logged_model_repository
+):
+    run_repository.find_by_id.return_value = None
+
+    with pytest.raises(MlflowException) as caught:
+        run_store.log_batch(RUN_ID, [Metric("loss", 1, TIMESTAMP, 0, model_id="m-missing")], [], [])
+
+    assert caught.value.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST)
+    logged_model_repository.find_existing_ids.assert_not_called()
+    run_repository.log_batch.assert_not_called()
+
+
+def test_deleted_run_takes_precedence_over_missing_metric_model(
+    run_store, run_repository, run_record_factory, logged_model_repository
+):
+    run_repository.find_by_id.return_value = run_record_factory(
+        lifecycle_stage=LifecycleStage.DELETED
+    )
+
+    with pytest.raises(MlflowException) as caught:
+        run_store.log_batch(RUN_ID, [Metric("loss", 1, TIMESTAMP, 0, model_id="m-missing")], [], [])
+
+    assert caught.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
+    assert "must be in the 'active' state" in caught.value.message
+    logged_model_repository.find_existing_ids.assert_not_called()
+    run_repository.log_batch.assert_not_called()
+
+
+def test_parameter_conflict_takes_precedence_over_missing_metric_model(
+    run_store, run_repository, run_record_factory, logged_model_repository
+):
+    run_repository.find_by_id.return_value = run_record_factory(params=[{"k": "depth", "v": "3"}])
+
+    with pytest.raises(MlflowException) as caught:
+        run_store.log_batch(
+            RUN_ID,
+            [Metric("loss", 1, TIMESTAMP, 0, model_id="m-missing")],
+            [Param("depth", "4")],
+            [],
+        )
+
+    assert caught.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
+    assert "Changing param values is not allowed" in caught.value.message
+    logged_model_repository.find_existing_ids.assert_not_called()
+    run_repository.log_batch.assert_not_called()
+
+
+def test_metric_model_lookup_failure_is_sanitized_before_writes(
+    run_store, run_repository, logged_model_repository, caplog
+):
+    failure = RepositoryPersistenceError("Private database URI and query")
+    logged_model_repository.find_existing_ids.side_effect = failure
+
+    with pytest.raises(MlflowException) as caught:
+        run_store.log_batch(RUN_ID, [Metric("loss", 1, TIMESTAMP, 0, model_id="m-model")], [], [])
+
+    assert caught.value.error_code == ErrorCode.Name(INTERNAL_ERROR)
+    assert caught.value.message == "Unable to log run batch."
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True
+    assert len(caplog.records) == 1
+    assert caplog.records[0].args == (failure,)
+    assert caplog.records[0].exc_info is None
     run_repository.log_batch.assert_not_called()
 
 
