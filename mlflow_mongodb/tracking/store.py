@@ -2624,6 +2624,7 @@ class MongoDBTrackingStore(AbstractStore):
         if not prompt_versions:
             return
 
+        self._get_trace_record(trace_id)
         refs = [
             {"name": prompt_version.name, "version": str(prompt_version.version)}
             for prompt_version in prompt_versions
@@ -2649,7 +2650,16 @@ class MongoDBTrackingStore(AbstractStore):
                 f"Provided {len(trace_ids)} traces."
             )
 
-        self._trace_repository.link_traces_to_run(trace_ids=list(trace_ids), run_id=run_id)
+        self.get_run(run_id)
+        trace_ids = list(dict.fromkeys(trace_ids))
+        records = self._trace_repository.batch_get_trace_infos(trace_ids)
+        existing_ids = {record.trace_id for record in records}
+        for trace_id in trace_ids:
+            if trace_id not in existing_ids:
+                raise MlflowException(
+                    f"Trace with ID '{trace_id}' not found.", RESOURCE_DOES_NOT_EXIST
+                )
+        self._trace_repository.link_traces_to_run(trace_ids=trace_ids, run_id=run_id)
 
     def unlink_traces_from_run(self, trace_ids: list[str], run_id: str) -> None:
         raise NotImplementedError

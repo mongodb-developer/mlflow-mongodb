@@ -827,13 +827,19 @@ def test_empty_run_links_skip_validation_and_repository(trace_store, trace_repos
     trace_repository.link_traces_to_run.assert_not_called()
 
 
-def test_run_links_accept_maximum_request_size(trace_store, trace_repository):
+def test_run_links_accept_maximum_request_size(trace_store, trace_repository, trace_record_factory):
     trace_ids = [f"tr-{index}" for index in range(100)]
+    trace_repository.batch_get_trace_infos.return_value = [
+        trace_record_factory(_id=trace_id) for trace_id in trace_ids
+    ]
     trace_store.link_traces_to_run(trace_ids, "run")
     trace_repository.link_traces_to_run.assert_called_once_with(trace_ids=trace_ids, run_id="run")
 
 
-def test_run_link_persistence_failure_is_sanitized(trace_store, trace_repository, caplog):
+def test_run_link_persistence_failure_is_sanitized(
+    trace_store, trace_repository, trace_record_factory, caplog
+):
+    trace_repository.batch_get_trace_infos.return_value = [trace_record_factory()]
     error = RepositoryPersistenceError("Private URI and query")
     trace_repository.link_traces_to_run.side_effect = error
     with pytest.raises(MlflowException) as caught:

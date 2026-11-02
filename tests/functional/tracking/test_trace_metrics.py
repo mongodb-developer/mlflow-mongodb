@@ -148,18 +148,21 @@ def test_trace_counts_group_by_status(store, trace_info_factory):
         (["trace.status = 'OK'"], 2),
         (["trace.tag.`team.name` = '$risk'"], 2),
         (["trace.metadata.`session.key` = '$session'"], 1),
-        ([f"trace.metadata.`{TraceMetadataKey.SOURCE_RUN}` = 'run-one'"], 2),
+        ([f"trace.metadata.`{TraceMetadataKey.SOURCE_RUN}` = '{{run_id}}'"], 2),
         (["trace.status = 'OK'", "trace.tag.`team.name` = '$risk'"], 1),
         (["trace.status = 'IN_PROGRESS'"], 0),
     ],
 )
 def test_trace_metric_filters_match_status_tags_metadata_and_run_links(
-    store, trace_info_factory, filters, expected_count
+    store, trace_info_factory, run, filters, expected_count
 ):
     metadata_linked = store.start_trace(
         trace_info_factory(
             tags={"team.name": "$risk"},
-            trace_metadata={"session.key": "$session", TraceMetadataKey.SOURCE_RUN: "run-one"},
+            trace_metadata={
+                "session.key": "$session",
+                TraceMetadataKey.SOURCE_RUN: run.info.run_id,
+            },
         )
     )
     # Isolate the metadata association from the explicit run-link representation.
@@ -174,7 +177,7 @@ def test_trace_metric_filters_match_status_tags_metadata_and_run_links(
             trace_metadata={"session.key": "other"},
         )
     )
-    store.link_traces_to_run([explicitly_linked.trace_id], "run-one")
+    store.link_traces_to_run([explicitly_linked.trace_id], run.info.run_id)
     store.start_trace(
         trace_info_factory(
             tags={"team.name": "other", "decoy": "$risk"},
@@ -187,7 +190,7 @@ def test_trace_metric_filters_match_status_tags_metadata_and_run_links(
         MetricViewType.TRACES,
         TraceMetricKey.TRACE_COUNT,
         [MetricAggregation(AggregationType.COUNT)],
-        filters=filters,
+        filters=[expression.format(run_id=run.info.run_id) for expression in filters],
     )
 
     assert len(result) == 1

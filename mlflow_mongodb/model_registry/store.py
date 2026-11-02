@@ -2,11 +2,13 @@
 
 import logging
 import urllib.parse
+from contextlib import suppress
 from functools import cached_property
 
 from mlflow.entities.model_registry import (
     ModelVersion,
     ModelVersionTag,
+    PromptVersion,
     RegisteredModel,
     RegisteredModelAlias,
     RegisteredModelTag,
@@ -39,6 +41,13 @@ from mlflow.store.model_registry import (
     SEARCH_REGISTERED_MODEL_MAX_RESULTS_THRESHOLD,
 )
 from mlflow.store.model_registry.abstract_store import AbstractStore
+<<<<<<< HEAD
+=======
+from mlflow.tracing.utils.prompt import update_linked_prompts_tag
+from mlflow.tracking._tracking_service.utils import (
+    _get_store as get_tracking_store,
+)
+>>>>>>> b76feec (Validate link endpoints and respect configured tracking stores)
 from mlflow.tracking._tracking_service.utils import (
     _resolve_tracking_uri as resolve_tracking_uri,
 )
@@ -67,6 +76,13 @@ from mlflow_mongodb.infrastructure.errors import (
     RepositoryUnsupportedComparatorError,
     RepositoryUnsupportedFieldTypeError,
     redact_uri,
+<<<<<<< HEAD
+=======
+)
+from mlflow_mongodb.infrastructure.prompt_links import (
+    LINKED_PROMPTS_TAG_KEY,
+    resolve_prompt_versions,
+>>>>>>> b76feec (Validate link endpoints and respect configured tracking stores)
 )
 from mlflow_mongodb.infrastructure.search_filters import (
     ConfiguredSearchFilterValidator,
@@ -169,6 +185,41 @@ class MongoDBModelRegistryStore(AbstractStore):
                 unsupported_uri=redact_uri(tracking_uri),
                 supported_uri_schemes=exc.supported_uri_schemes,
             ) from None
+
+    @cached_property
+    def _tracking_store(self):
+        tracking_uri = resolve_tracking_uri(self.tracking_uri)
+        try:
+            return get_tracking_store(store_uri=tracking_uri)
+        except UnsupportedModelRegistryStoreURIException as exc:
+            logger.error("Unable to initialize tracking store: %s", type(exc).__name__)
+            raise UnsupportedModelRegistryStoreURIException(
+                unsupported_uri=redact_uri(tracking_uri),
+                supported_uri_schemes=exc.supported_uri_schemes,
+            ) from None
+
+    def _prompt_link_lock_for(self, target):
+        # MLflow 3.5 uses one lock; newer versions provide one per target type.
+        return getattr(self, f"_link_to_{target}_lock", None) or self._prompt_link_lock
+
+    @handle_persistence_error("Unable to link prompts to trace.", logger=logger)
+    def link_prompts_to_trace(self, prompt_versions: list[PromptVersion], trace_id: str) -> None:
+        """Validate prompt versions and link them through the configured tracking URI."""
+        if not prompt_versions:
+            return
+        prompts = resolve_prompt_versions(prompt_versions, self.get_prompt_version)
+        with self._prompt_link_lock_for("trace"):
+            tracking_store = self._tracking_store
+            trace = tracking_store.get_trace_info(trace_id)
+            current = trace.tags.get(LINKED_PROMPTS_TAG_KEY)
+            updated = update_linked_prompts_tag(current, prompts)
+            link_prompts = getattr(tracking_store, "link_prompts_to_trace", None)
+            if link_prompts is not None:
+                # Older tracking stores expose prompt associations only as tags.
+                with suppress(NotImplementedError):
+                    link_prompts(trace_id, prompts)
+            if updated != current:
+                tracking_store.set_trace_tag(trace_id, LINKED_PROMPTS_TAG_KEY, updated)
 
     def _to_mlflow_registered_model_details(
         self,

@@ -1,12 +1,19 @@
 """Functional tests for the prompt API against a real MongoDB database."""
 
+import json
+from uuid import uuid4
+
 import mlflow
 import pytest
+from mlflow.entities import TraceInfo, TraceLocation, TraceState
 from mlflow.entities.model_registry import ModelVersionTag, RegisteredModelTag
 from mlflow.exceptions import MlflowException
 from mlflow.prompt.constants import IS_PROMPT_TAG_KEY
+from mlflow.protos.databricks_pb2 import RESOURCE_DOES_NOT_EXIST, ErrorCode
+from mlflow.tracking._tracking_service.utils import _get_store  # ruff: ignore[import-private-name]
 from packaging.version import Version
 
+from mlflow_mongodb.infrastructure.prompt_links import LINKED_PROMPTS_TAG_KEY
 from mlflow_mongodb.model_registry.store import MongoDBModelRegistryStore
 
 PROMPT_NAME = "mongodb-functional-prompt"
@@ -240,3 +247,95 @@ def test_models_and_prompts_cannot_reuse_each_others_names(
         store.create_prompt("name-owned-by-model")
     with pytest.raises(MlflowException, match="already taken by a prompt"):
         store.create_registered_model("name-owned-by-prompt")
+
+
+def test_prompt_run_link_uses_global_tracking_uri(store, mongodb_uri, tmp_path):
+    registry = MongoDBModelRegistryStore(store_uri=mongodb_uri, tracking_uri=mongodb_uri)
+    registry.__dict__["_mongo_client"] = store._mongo_client
+    tracking = _get_store(store_uri=mongodb_uri)
+    experiment_id = tracking.create_experiment(
+        f"prompt-link-routing-{uuid4().hex}", artifact_location=tmp_path.as_uri()
+    )
+    run = None
+    previous_tracking_uri = mlflow.get_tracking_uri()
+    try:
+        run = tracking.create_run(
+            experiment_id,
+            user_id="functional-test",
+            start_time=1_700_000_000_000,
+            tags=[],
+            run_name="configured-tracking-target",
+        )
+        registry.create_prompt("routing-prompt")
+        prompt = registry.create_prompt_version("routing-prompt", "Hello {{name}}")
+        global_uri = f"sqlite:///{tmp_path / 'global-tracking.db'}"
+        mlflow.set_tracking_uri(global_uri)
+        global_store = _get_store()
+
+        # The global tracking store has no copy of the target run.
+        with pytest.raises(MlflowException) as caught:
+            registry.link_prompt_version_to_run(prompt.name, str(prompt.version), run.info.run_id)
+        assert caught.value.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST)
+        assert LINKED_PROMPTS_TAG_KEY not in tracking.get_run(run.info.run_id).data.tags
+
+        mlflow.set_tracking_uri(mongodb_uri)
+        registry.link_prompt_version_to_run(prompt.name, str(prompt.version), run.info.run_id)
+        registry.link_prompt_version_to_run(prompt.name, str(prompt.version), run.info.run_id)
+
+        linked = tracking.get_run(run.info.run_id).data.tags[LINKED_PROMPTS_TAG_KEY]
+        assert json.loads(linked) == [{"name": prompt.name, "version": str(prompt.version)}]
+        assert mlflow.get_tracking_uri() == mongodb_uri
+        with pytest.raises(MlflowException) as caught:
+            global_store.get_run(run.info.run_id)
+        assert caught.value.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST)
+    finally:
+        mlflow.set_tracking_uri(previous_tracking_uri)
+        if run is not None:
+            tracking._database[tracking._settings.runs_collection_name].delete_one(
+                {"_id": run.info.run_id}
+            )
+        tracking._database[tracking._settings.experiments_collection_name].delete_one(
+            {"_id": int(experiment_id)}
+        )
+
+
+def test_prompt_trace_link_uses_originating_registry_with_different_global_registry(
+    store, mongodb_uri, tmp_path, monkeypatch
+):
+    registry = MongoDBModelRegistryStore(store_uri=mongodb_uri, tracking_uri=mongodb_uri)
+    registry.__dict__["_mongo_client"] = store._mongo_client
+    tracking = _get_store(store_uri=mongodb_uri)
+    experiment_id = tracking.create_experiment(
+        f"prompt-trace-routing-{uuid4().hex}", artifact_location=tmp_path.as_uri()
+    )
+    trace_id = f"tr-{uuid4().hex}"
+    try:
+        tracking.start_trace(
+            TraceInfo(
+                trace_id=trace_id,
+                trace_location=TraceLocation.from_experiment_id(experiment_id),
+                request_time=1_700_000_000_000,
+                state=TraceState.OK,
+                execution_duration=10,
+            )
+        )
+        registry.create_prompt("trace-routing-prompt")
+        prompt = registry.create_prompt_version("trace-routing-prompt", "Hello {{name}}")
+        # Any attempt to resolve the global registry would fail.
+        monkeypatch.setattr(
+            "mlflow.tracking._model_registry.utils._registry_uri",
+            "unsupported-registry://unrelated",
+        )
+
+        registry.link_prompts_to_trace([prompt], trace_id)
+        registry.link_prompts_to_trace([prompt], trace_id)
+
+        refs = [{"name": prompt.name, "version": str(prompt.version)}]
+        document = tracking._trace_repository._collection.find_one({"_id": trace_id})
+        assert document["linked_prompts"] == refs
+        assert json.loads(tracking.get_trace_info(trace_id).tags[LINKED_PROMPTS_TAG_KEY]) == refs
+    finally:
+        tracking._trace_repository._collection.delete_one({"_id": trace_id})
+        tracking._database[tracking._settings.experiments_collection_name].delete_one(
+            {"_id": int(experiment_id)}
+        )
