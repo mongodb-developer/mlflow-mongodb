@@ -7,7 +7,7 @@ from mlflow.exceptions import MlflowException
 from mlflow.prompt.constants import IS_PROMPT_TAG_KEY
 from packaging.version import Version
 
-from mlflow_mongodb import MongoDBModelRegistryStore
+from mlflow_mongodb.model_registry.store import MongoDBModelRegistryStore
 
 PROMPT_NAME = "mongodb-functional-prompt"
 PROMPT_DESCRIPTION = "Prompt persisted by the MongoDB functional suite"

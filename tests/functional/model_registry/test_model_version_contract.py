@@ -1,8 +1,18 @@
 """Functional model-version contracts shared with MLflow's reference stores."""
 
+from dataclasses import replace
+
 import pytest
+from bson import ObjectId
 from mlflow.entities.model_registry import ModelVersionTag
-from mlflow.entities.model_registry.model_version_stages import STAGE_DELETED_INTERNAL
+from mlflow.entities.model_registry.model_version_stages import (
+    STAGE_ARCHIVED,
+    STAGE_DELETED_INTERNAL,
+    STAGE_NONE,
+    STAGE_PRODUCTION,
+    STAGE_STAGING,
+)
+from mlflow.entities.model_registry.model_version_status import ModelVersionStatus
 from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import (
     INVALID_PARAMETER_VALUE,
@@ -10,7 +20,637 @@ from mlflow.protos.databricks_pb2 import (
     ErrorCode,
 )
 
-from mlflow_mongodb import MongoDBModelRegistryStore
+from mlflow_mongodb.infrastructure.errors import (
+    RepositoryAlreadyExistsError,
+    RepositoryNotFoundError,
+)
+from mlflow_mongodb.model_registry.repositories import ModelVersionOrder
+from mlflow_mongodb.model_registry.store import MongoDBModelRegistryStore
+from mlflow_mongodb.model_registry.types import (
+    ModelVersionRecord,
+    ModelVersionSearchResult,
+    ModelVersionTagRecord,
+)
+
+
+@pytest.fixture
+def version_create_args(store):
+    store.create_registered_model("repository-create")
+    parent = store._registered_model_repository.find_by_name("repository-create")
+    return {
+        "registered_model_id": parent.model_id,
+        "version": 1,
+        "creation_timestamp": 1_700_001_000_000,
+        "description": "Model description",
+        "current_stage": STAGE_NONE,
+        "source": "s3://models/source",
+        "storage_location": "s3://models/resolved",
+        "run_id": "source-run",
+        "run_link": "https://mlflow.example/runs/source-run",
+        "status": ModelVersionStatus.to_string(ModelVersionStatus.READY),
+        "tags": {"team.name": "$risk", "$literal": "value"},
+        "model_id": "m-" + "a" * 32,
+    }
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {},
+        {
+            "description": None,
+            "source": None,
+            "storage_location": None,
+            "run_id": None,
+            "run_link": None,
+            "tags": {},
+            "model_id": None,
+        },
+    ],
+    ids=["complete-metadata", "optional-metadata-absent"],
+)
+def test_repository_create_persists_metadata_and_returns_record(
+    store, version_create_args, overrides
+):
+    arguments = {**version_create_args, **overrides}
+
+    record = store._model_version_repository.create(**arguments)
+
+    assert isinstance(record.model_version_id, ObjectId)
+    assert record == ModelVersionRecord(
+        **{
+            **arguments,
+            "tags": tuple(
+                ModelVersionTagRecord(key, value) for key, value in arguments["tags"].items()
+            ),
+        },
+        model_version_id=record.model_version_id,
+        last_updated_timestamp=arguments["creation_timestamp"],
+        user_id=None,
+        status_message=None,
+    )
+    collection = store._database[store._settings.model_versions_collection_name]
+    assert collection.find_one({"_id": record.model_version_id}) == {
+        **arguments,
+        "_id": record.model_version_id,
+        "last_updated_timestamp": arguments["creation_timestamp"],
+        "user_id": None,
+        "status_message": None,
+        "tags": [{"key": key, "value": value} for key, value in arguments["tags"].items()],
+    }
+    assert (
+        store._model_version_repository.find_by_version(
+            registered_model_id=record.registered_model_id, version=record.version
+        )
+        == record
+    )
+
+
+def test_repository_create_duplicate_version_preserves_existing_document(
+    store, version_create_args
+):
+    repository = store._model_version_repository
+    original = repository.create(**version_create_args)
+    collection = store._database[store._settings.model_versions_collection_name]
+    before = collection.find_one({"_id": original.model_version_id})
+
+    with pytest.raises(RepositoryAlreadyExistsError) as caught:
+        repository.create(**{**version_create_args, "description": "Replacement"})
+
+    assert caught.value.args == (
+        f"{version_create_args['registered_model_id']}:{version_create_args['version']}",
+    )
+    assert collection.count_documents({}) == 1
+    assert collection.find_one({"_id": original.model_version_id}) == before
+
+
+@pytest.mark.parametrize("description", ["", None])
+def test_repository_update_description_changes_only_description_and_timestamp(
+    store, version_create_args, description
+):
+    repository = store._model_version_repository
+    original = repository.create(**version_create_args)
+    peer = repository.create(**{**version_create_args, "version": 2})
+    collection = store._database[store._settings.model_versions_collection_name]
+    before = collection.find_one({"_id": original.model_version_id})
+    peer_before = collection.find_one({"_id": peer.model_version_id})
+    timestamp = original.creation_timestamp + 1000
+
+    updated = repository.update_description(
+        registered_model_id=original.registered_model_id,
+        version=original.version,
+        description=description,
+        last_updated_timestamp=timestamp,
+    )
+
+    assert updated == replace(original, description=description, last_updated_timestamp=timestamp)
+    assert collection.find_one({"_id": original.model_version_id}) == {
+        **before,
+        "description": description,
+        "last_updated_timestamp": timestamp,
+    }
+    assert collection.find_one({"_id": peer.model_version_id}) == peer_before
+
+
+@pytest.mark.parametrize("target", [{"version": 2}, {"registered_model_id": ObjectId()}])
+def test_repository_update_description_missing_target_leaves_existing_version_unchanged(
+    store, version_create_args, target
+):
+    repository = store._model_version_repository
+    original = repository.create(**version_create_args)
+    collection = store._database[store._settings.model_versions_collection_name]
+    before = collection.find_one({"_id": original.model_version_id})
+    identity = {
+        "registered_model_id": original.registered_model_id,
+        "version": original.version,
+        **target,
+    }
+
+    with pytest.raises(RepositoryNotFoundError) as caught:
+        repository.update_description(
+            **identity,
+            description="Updated description",
+            last_updated_timestamp=original.creation_timestamp + 1000,
+        )
+
+    assert caught.value.resource_id == f"{identity['registered_model_id']}:{identity['version']}"
+    assert collection.count_documents({}) == 1
+    assert collection.find_one({"_id": original.model_version_id}) == before
+
+
+@pytest.mark.parametrize("target", [{"version": 2}, {"registered_model_id": ObjectId()}])
+def test_repository_transition_stage_missing_target_leaves_existing_version_unchanged(
+    store, version_create_args, target
+):
+    repository = store._model_version_repository
+    original = repository.create(**version_create_args)
+    collection = store._database[store._settings.model_versions_collection_name]
+    before = collection.find_one({"_id": original.model_version_id})
+    identity = {
+        "registered_model_id": original.registered_model_id,
+        "version": original.version,
+        **target,
+    }
+
+    with pytest.raises(RepositoryNotFoundError) as caught:
+        repository.transition_stage(
+            **identity,
+            stage=STAGE_STAGING,
+            last_updated_timestamp=original.creation_timestamp + 1000,
+        )
+
+    assert caught.value.resource_id == f"{identity['registered_model_id']}:{identity['version']}"
+    assert collection.count_documents({}) == 1
+    assert collection.find_one({"_id": original.model_version_id}) == before
+
+
+@pytest.mark.parametrize("stage", [STAGE_STAGING, STAGE_PRODUCTION])
+def test_repository_archive_other_versions_changes_only_matching_peers(
+    store, version_create_args, stage
+):
+    repository = store._model_version_repository
+    collection = store._database[store._settings.model_versions_collection_name]
+    selected = repository.create(**{**version_create_args, "current_stage": stage})
+    peers = [
+        repository.create(**{**version_create_args, "version": version, "current_stage": stage})
+        for version in (2, 3)
+    ]
+    untouched = [
+        repository.create(
+            **{**version_create_args, "version": version, "current_stage": other_stage}
+        )
+        for version, other_stage in (
+            (4, STAGE_NONE),
+            (5, STAGE_ARCHIVED),
+            (6, STAGE_DELETED_INTERNAL),
+        )
+    ]
+    store.create_registered_model("other-archive-parent")
+    other_parent = store._registered_model_repository.find_by_name("other-archive-parent")
+    untouched.append(
+        repository.create(
+            **{
+                **version_create_args,
+                "registered_model_id": other_parent.model_id,
+                "current_stage": stage,
+            }
+        )
+    )
+    unchanged = {
+        record.model_version_id: collection.find_one({"_id": record.model_version_id})
+        for record in [selected, *untouched]
+    }
+    peer_documents = [collection.find_one({"_id": peer.model_version_id}) for peer in peers]
+    timestamp = selected.creation_timestamp + 1000
+
+    repository.archive_other_versions_in_stage(
+        registered_model_id=selected.registered_model_id,
+        version=selected.version,
+        stage=stage,
+        last_updated_timestamp=timestamp,
+    )
+
+    for before in peer_documents:
+        assert collection.find_one({"_id": before["_id"]}) == {
+            **before,
+            "current_stage": STAGE_ARCHIVED,
+            "last_updated_timestamp": timestamp,
+        }
+    for model_version_id, before in unchanged.items():
+        assert collection.find_one({"_id": model_version_id}) == before
+
+
+def test_repository_touch_all_updates_every_stage_without_changing_other_models(
+    store, version_create_args
+):
+    repository = store._model_version_repository
+    collection = store._database[store._settings.model_versions_collection_name]
+    versions = [
+        repository.create(**{**version_create_args, "version": version, "current_stage": stage})
+        for version, stage in enumerate(
+            (STAGE_NONE, STAGE_STAGING, STAGE_PRODUCTION, STAGE_ARCHIVED, STAGE_DELETED_INTERNAL),
+            start=1,
+        )
+    ]
+    store.create_registered_model("other-touch-parent")
+    other_parent = store._registered_model_repository.find_by_name("other-touch-parent")
+    other = repository.create(
+        **{**version_create_args, "registered_model_id": other_parent.model_id}
+    )
+    other_before = collection.find_one({"_id": other.model_version_id})
+    before = [collection.find_one({"_id": record.model_version_id}) for record in versions]
+    timestamp = version_create_args["creation_timestamp"] + 1000
+
+    repository.touch_all_for_registered_model(
+        registered_model_id=version_create_args["registered_model_id"],
+        last_updated_timestamp=timestamp,
+    )
+
+    for document in before:
+        assert collection.find_one({"_id": document["_id"]}) == {
+            **document,
+            "last_updated_timestamp": timestamp,
+        }
+    assert collection.find_one({"_id": other.model_version_id}) == other_before
+
+
+def test_repository_touch_all_missing_parent_leaves_existing_versions_unchanged(
+    store, version_create_args
+):
+    repository = store._model_version_repository
+    original = repository.create(**version_create_args)
+    collection = store._database[store._settings.model_versions_collection_name]
+    before = collection.find_one({"_id": original.model_version_id})
+
+    repository.touch_all_for_registered_model(
+        registered_model_id=ObjectId(),
+        last_updated_timestamp=original.creation_timestamp + 1000,
+    )
+
+    assert collection.count_documents({}) == 1
+    assert collection.find_one({"_id": original.model_version_id}) == before
+
+
+@pytest.mark.parametrize("target", [{"version": 2}, {"registered_model_id": ObjectId()}])
+def test_repository_soft_delete_missing_target_preserves_existing_version(
+    store, version_create_args, target
+):
+    repository = store._model_version_repository
+    original = repository.create(**version_create_args)
+    collection = store._database[store._settings.model_versions_collection_name]
+    before = collection.find_one({"_id": original.model_version_id})
+    identity = {
+        "registered_model_id": original.registered_model_id,
+        "version": original.version,
+        **target,
+    }
+
+    with pytest.raises(RepositoryNotFoundError) as caught:
+        repository.soft_delete(
+            **identity, last_updated_timestamp=original.creation_timestamp + 1000
+        )
+
+    assert caught.value.resource_id == f"{identity['registered_model_id']}:{identity['version']}"
+    assert collection.find_one({"_id": original.model_version_id}) == before
+
+
+def test_repository_soft_delete_repeated_call_preserves_first_deletion_timestamp(
+    store, version_create_args
+):
+    repository = store._model_version_repository
+    original = repository.create(**version_create_args)
+    repository.soft_delete(
+        registered_model_id=original.registered_model_id,
+        version=original.version,
+        last_updated_timestamp=original.creation_timestamp + 1000,
+    )
+    collection = store._database[store._settings.model_versions_collection_name]
+    before = collection.find_one({"_id": original.model_version_id})
+
+    with pytest.raises(RepositoryNotFoundError) as caught:
+        repository.soft_delete(
+            registered_model_id=original.registered_model_id,
+            version=original.version,
+            last_updated_timestamp=original.creation_timestamp + 2000,
+        )
+
+    assert caught.value.resource_id == f"{original.registered_model_id}:{original.version}"
+    assert collection.find_one({"_id": original.model_version_id}) == before
+
+
+def test_repository_delete_all_removes_every_stage_and_preserves_other_models(
+    store, version_create_args
+):
+    repository = store._model_version_repository
+    collection = store._database[store._settings.model_versions_collection_name]
+    stages = (STAGE_NONE, STAGE_STAGING, STAGE_PRODUCTION, STAGE_ARCHIVED, STAGE_DELETED_INTERNAL)
+    for version, stage in enumerate(stages, start=1):
+        repository.create(**{**version_create_args, "version": version, "current_stage": stage})
+    store.create_registered_model("other-delete-parent")
+    other_parent = store._registered_model_repository.find_by_name("other-delete-parent")
+    other = repository.create(
+        **{**version_create_args, "registered_model_id": other_parent.model_id}
+    )
+    other_before = collection.find_one({"_id": other.model_version_id})
+    parents = store._database[store._settings.registered_models_collection_name]
+    parent_before = parents.find_one({"_id": version_create_args["registered_model_id"]})
+
+    deleted_count = repository.delete_all_for_registered_model(
+        registered_model_id=version_create_args["registered_model_id"]
+    )
+
+    assert deleted_count == len(stages)
+    assert (
+        collection.count_documents(
+            {"registered_model_id": version_create_args["registered_model_id"]}
+        )
+        == 0
+    )
+    assert collection.count_documents({}) == 1
+    assert collection.find_one({"_id": other.model_version_id}) == other_before
+    assert parents.find_one({"_id": version_create_args["registered_model_id"]}) == parent_before
+    assert (
+        repository.delete_all_for_registered_model(
+            registered_model_id=version_create_args["registered_model_id"]
+        )
+        == 0
+    )
+
+
+def test_repository_delete_all_missing_parent_returns_zero_without_changing_versions(
+    store, version_create_args
+):
+    repository = store._model_version_repository
+    original = repository.create(**version_create_args)
+    collection = store._database[store._settings.model_versions_collection_name]
+    before = collection.find_one({"_id": original.model_version_id})
+
+    deleted_count = repository.delete_all_for_registered_model(registered_model_id=ObjectId())
+
+    assert deleted_count == 0
+    assert collection.count_documents({}) == 1
+    assert collection.find_one({"_id": original.model_version_id}) == before
+
+
+@pytest.mark.parametrize(
+    "initial_tags,key,value",
+    [
+        ({}, "$literal", "$value"),
+        ({"team.name": "$old", "keep": "yes"}, "team.name", "$new"),
+        ({"$literal": "old", "keep": "yes"}, "$literal", ""),
+    ],
+)
+def test_repository_set_tag_adds_or_replaces_literal_entry_without_other_changes(
+    store, version_create_args, initial_tags, key, value
+):
+    repository = store._model_version_repository
+    original = repository.create(**{**version_create_args, "tags": initial_tags})
+    peer = repository.create(**{**version_create_args, "version": 2})
+    collection = store._database[store._settings.model_versions_collection_name]
+    before = collection.find_one({"_id": original.model_version_id})
+    peer_before = collection.find_one({"_id": peer.model_version_id})
+    expected_tags = [tag for tag in before["tags"] if tag["key"] != key]
+    expected_tags.append({"key": key, "value": value})
+
+    updated = repository.set_tag(
+        registered_model_id=original.registered_model_id,
+        version=original.version,
+        key=key,
+        value=value,
+    )
+
+    assert updated == replace(
+        original,
+        tags=tuple(ModelVersionTagRecord(tag["key"], tag["value"]) for tag in expected_tags),
+    )
+    assert collection.find_one({"_id": original.model_version_id}) == {
+        **before,
+        "tags": expected_tags,
+    }
+    assert collection.find_one({"_id": peer.model_version_id}) == peer_before
+
+
+@pytest.mark.parametrize("target", [{"version": 2}, {"registered_model_id": ObjectId()}])
+def test_repository_set_tag_missing_target_preserves_existing_version(
+    store, version_create_args, target
+):
+    repository = store._model_version_repository
+    original = repository.create(**version_create_args)
+    collection = store._database[store._settings.model_versions_collection_name]
+    before = collection.find_one({"_id": original.model_version_id})
+    identity = {
+        "registered_model_id": original.registered_model_id,
+        "version": original.version,
+        **target,
+    }
+
+    with pytest.raises(RepositoryNotFoundError) as caught:
+        repository.set_tag(**identity, key="new", value="value")
+
+    assert caught.value.resource_id == f"{identity['registered_model_id']}:{identity['version']}"
+    assert collection.count_documents({}) == 1
+    assert collection.find_one({"_id": original.model_version_id}) == before
+
+
+@pytest.mark.parametrize(
+    "initial_tags,key",
+    [
+        ({}, "absent"),
+        ({"team.name": "$risk", "keep": "yes"}, "team.name"),
+        ({"$literal": "value", "keep": "yes"}, "$literal"),
+    ],
+)
+def test_repository_delete_tag_preserves_other_entries_and_metadata(
+    store, version_create_args, initial_tags, key
+):
+    repository = store._model_version_repository
+    original = repository.create(**{**version_create_args, "tags": initial_tags})
+    peer = repository.create(**{**version_create_args, "version": 2})
+    collection = store._database[store._settings.model_versions_collection_name]
+    before = collection.find_one({"_id": original.model_version_id})
+    peer_before = collection.find_one({"_id": peer.model_version_id})
+    expected_tags = [tag for tag in before["tags"] if tag["key"] != key]
+
+    updated = repository.delete_tag(
+        registered_model_id=original.registered_model_id,
+        version=original.version,
+        key=key,
+    )
+
+    assert updated == replace(
+        original,
+        tags=tuple(ModelVersionTagRecord(tag["key"], tag["value"]) for tag in expected_tags),
+    )
+    assert collection.find_one({"_id": original.model_version_id}) == {
+        **before,
+        "tags": expected_tags,
+    }
+    assert collection.find_one({"_id": peer.model_version_id}) == peer_before
+
+
+@pytest.mark.parametrize("target", [{"version": 2}, {"registered_model_id": ObjectId()}])
+def test_repository_delete_tag_missing_target_preserves_existing_version(
+    store, version_create_args, target
+):
+    repository = store._model_version_repository
+    original = repository.create(**version_create_args)
+    collection = store._database[store._settings.model_versions_collection_name]
+    before = collection.find_one({"_id": original.model_version_id})
+    identity = {
+        "registered_model_id": original.registered_model_id,
+        "version": original.version,
+        **target,
+    }
+
+    with pytest.raises(RepositoryNotFoundError) as caught:
+        repository.delete_tag(**identity, key="team.name")
+
+    assert caught.value.resource_id == f"{identity['registered_model_id']}:{identity['version']}"
+    assert collection.count_documents({}) == 1
+    assert collection.find_one({"_id": original.model_version_id}) == before
+
+
+@pytest.mark.parametrize(
+    "name,version,stage,expected",
+    [
+        ("repository-create", 1, STAGE_NONE, True),
+        ("repository-create", 1, STAGE_DELETED_INTERNAL, False),
+        ("repository-create", 2, STAGE_NONE, False),
+        ("other-exists-parent", 1, STAGE_NONE, False),
+        ("other-exists-parent", 2, STAGE_NONE, True),
+        ("empty-exists-parent", 1, STAGE_NONE, False),
+        ("missing-parent", 1, STAGE_NONE, False),
+        ("Repository-create", 1, STAGE_NONE, False),
+    ],
+)
+def test_repository_exists_for_registered_model_scopes_name_and_version(
+    store, version_create_args, name, version, stage, expected
+):
+    repository = store._model_version_repository
+    repository.create(**{**version_create_args, "current_stage": stage})
+    store.create_registered_model("other-exists-parent")
+    other_parent = store._registered_model_repository.find_by_name("other-exists-parent")
+    repository.create(
+        **{**version_create_args, "registered_model_id": other_parent.model_id, "version": 2}
+    )
+    store.create_registered_model("empty-exists-parent")
+
+    exists = repository.exists_for_registered_model(registered_model_name=name, version=version)
+
+    assert exists is expected
+
+
+@pytest.mark.parametrize(
+    "stages,expected_versions",
+    [
+        ([STAGE_PRODUCTION, STAGE_STAGING, STAGE_ARCHIVED, STAGE_NONE], (9, 8, 7, 3)),
+        ([STAGE_STAGING, STAGE_STAGING, STAGE_PRODUCTION], (9, 7)),
+        ([], ()),
+    ],
+)
+def test_repository_find_latest_by_stages_selects_highest_version_and_sorts_descending(
+    store, version_create_args, stages, expected_versions
+):
+    repository = store._model_version_repository
+    versions = {
+        version: repository.create(
+            **{
+                **version_create_args,
+                "version": version,
+                "current_stage": stage,
+                "creation_timestamp": version_create_args["creation_timestamp"] + 1000 - version,
+            }
+        )
+        for version, stage in (
+            (9, STAGE_STAGING),
+            (1, STAGE_STAGING),
+            (7, STAGE_PRODUCTION),
+            (2, STAGE_PRODUCTION),
+            (3, STAGE_NONE),
+            (8, STAGE_ARCHIVED),
+            (4, STAGE_ARCHIVED),
+            (10, STAGE_DELETED_INTERNAL),
+        )
+    }
+    store.create_registered_model("other-latest-parent")
+    other_parent = store._registered_model_repository.find_by_name("other-latest-parent")
+    repository.create(
+        **{
+            **version_create_args,
+            "registered_model_id": other_parent.model_id,
+            "version": 99,
+            "current_stage": STAGE_STAGING,
+        }
+    )
+
+    latest = repository.find_latest_by_stages(
+        registered_model_id=version_create_args["registered_model_id"], stages=stages
+    )
+
+    assert latest == tuple(versions[version] for version in expected_versions)
+
+
+def test_repository_find_latest_by_stages_missing_parent_returns_empty_tuple(
+    store, version_create_args
+):
+    repository = store._model_version_repository
+    repository.create(**version_create_args)
+
+    latest = repository.find_latest_by_stages(registered_model_id=ObjectId(), stages=[STAGE_NONE])
+
+    assert latest == ()
+
+
+@pytest.mark.parametrize(
+    "offset,expected_versions,has_more",
+    [(0, (2,), True), (1, (1,), False), (2, (), False)],
+)
+def test_repository_search_excludes_orphans_and_deleted_versions_before_pagination(
+    store, version_create_args, offset, expected_versions, has_more
+):
+    repository = store._model_version_repository
+    parent = store._registered_model_repository.find_by_name("repository-create")
+    versions = {
+        version: repository.create(**{**version_create_args, "version": version})
+        for version in (1, 2)
+    }
+    repository.create(
+        **{**version_create_args, "version": 3, "current_stage": STAGE_DELETED_INTERNAL}
+    )
+    repository.create(**{**version_create_args, "registered_model_id": ObjectId(), "version": 99})
+
+    page = repository.search(
+        filters=(),
+        order_by=(ModelVersionOrder("version_number", False),),
+        exclude_prompts=False,
+        offset=offset,
+        max_results=1,
+    )
+
+    assert page.records == tuple(
+        ModelVersionSearchResult(versions[version], parent) for version in expected_versions
+    )
+    assert page.has_more is has_more
 
 
 def test_model_version_create_update_and_stage_validation_contract(
@@ -66,6 +706,10 @@ def test_model_version_create_update_and_stage_validation_contract(
     assert updated.current_stage == "None"
     assert updated.last_updated_timestamp == clock["now"]
 
+    parent = store._registered_model_repository.find_by_name(name)
+    collection = store._database[store._settings.model_versions_collection_name]
+    identity = {"registered_model_id": parent.model_id, "version": version.version}
+    before_transition = collection.find_one(identity)
     transitioned = store.transition_model_version_stage(
         name,
         version.version,
@@ -74,6 +718,11 @@ def test_model_version_create_update_and_stage_validation_contract(
     )
     assert transitioned.current_stage == "Staging"
     assert store.get_model_version(name, version.version).description == "Reviewed version"
+    assert collection.find_one(identity) == {
+        **before_transition,
+        "current_stage": STAGE_STAGING,
+        "last_updated_timestamp": clock["now"],
+    }
 
     with pytest.raises(
         MlflowException,
@@ -173,20 +822,28 @@ def test_deleted_model_version_is_redacted_and_unavailable(
 
     registered_model = store._registered_model_repository.find_by_name(name)
     assert registered_model is not None
+    collection = store._database[store._settings.model_versions_collection_name]
+    identity = {"registered_model_id": registered_model.model_id, "version": version.version}
+    collection.update_one(
+        identity, {"$set": {"user_id": "private-user", "status_message": "private-status"}}
+    )
+    before_deletion = collection.find_one(identity)
     store.delete_model_version(name, version.version)
 
-    raw_version = store._database[store._settings.model_versions_collection_name].find_one(
-        {
-            "registered_model_id": registered_model.model_id,
-            "version": version.version,
-        }
-    )
+    raw_version = collection.find_one(identity)
     assert raw_version is not None
-    assert raw_version["current_stage"] == STAGE_DELETED_INTERNAL
-    assert raw_version["description"] is None
-    assert raw_version["source"] == "REDACTED-SOURCE-PATH"
-    assert raw_version["run_id"] == "REDACTED-RUN-ID"
-    assert raw_version["run_link"] == "REDACTED-RUN-LINK"
+    assert raw_version == {
+        **before_deletion,
+        "current_stage": STAGE_DELETED_INTERNAL,
+        "last_updated_timestamp": raw_version["last_updated_timestamp"],
+        "description": None,
+        "user_id": None,
+        "source": "REDACTED-SOURCE-PATH",
+        "run_id": "REDACTED-RUN-ID",
+        "run_link": "REDACTED-RUN-LINK",
+        "status_message": None,
+    }
+    assert raw_version["last_updated_timestamp"] >= before_deletion["last_updated_timestamp"]
     assert store.get_registered_model(name).aliases == {}
 
     operations = (

@@ -5,7 +5,8 @@ from unittest.mock import MagicMock, call
 import pytest
 from mlflow.exceptions import MlflowException
 
-from mlflow_mongodb import MongoDBModelRegistryStore, __version__
+from mlflow_mongodb import __version__
+from mlflow_mongodb.model_registry.store import MongoDBModelRegistryStore
 
 
 def test_mongo_client_reports_driver_name_and_version(monkeypatch):

@@ -18,13 +18,13 @@ from mlflow_mongodb.infrastructure.array_operations import (
     build_remove_array_element_update,
     build_replace_array_element_pipeline,
 )
+from mlflow_mongodb.infrastructure.errors import (
+    RepositoryAlreadyExistsError,
+    RepositoryNotFoundError,
+)
 from mlflow_mongodb.infrastructure.repository_operations import repository_operation
 from mlflow_mongodb.infrastructure.search_filters import build_value_condition
 from mlflow_mongodb.infrastructure.settings import MongoDBSettings
-from mlflow_mongodb.model_registry.errors import (
-    ModelVersionAlreadyExistsError,
-    ModelVersionNotFoundError,
-)
 from mlflow_mongodb.model_registry.types import (
     ModelVersionRecord,
     ModelVersionSearchResult,
@@ -131,7 +131,7 @@ class ModelVersionRepository:
             The created :class:`ModelVersionRecord`.
 
         Raises:
-            ModelVersionAlreadyExistsError: If the version already exists for
+            RepositoryAlreadyExistsError: If the version already exists for
                 the registered model.
         """
         document: dict[str, Any] = {
@@ -156,7 +156,7 @@ class ModelVersionRepository:
             try:
                 result = self._collection.insert_one(document)
             except DuplicateKeyError as exc:
-                raise ModelVersionAlreadyExistsError(f"{registered_model_id}:{version}") from exc
+                raise RepositoryAlreadyExistsError(f"{registered_model_id}:{version}") from exc
 
         document["_id"] = result.inserted_id
         return ModelVersionRecord.from_document(document)
@@ -181,7 +181,7 @@ class ModelVersionRepository:
             The updated :class:`ModelVersionRecord`.
 
         Raises:
-            ModelVersionNotFoundError: If the model version does not exist or
+            RepositoryNotFoundError: If the model version does not exist or
                 has been soft-deleted.
         """
         with repository_operation("Unable to update description."):
@@ -200,7 +200,7 @@ class ModelVersionRepository:
                 return_document=ReturnDocument.AFTER,
             )
         if document is None:
-            raise ModelVersionNotFoundError(f"{registered_model_id}:{version}")
+            raise RepositoryNotFoundError(f"{registered_model_id}:{version}")
 
         return ModelVersionRecord.from_document(document)
 
@@ -224,7 +224,7 @@ class ModelVersionRepository:
             The updated :class:`ModelVersionRecord`.
 
         Raises:
-            ModelVersionNotFoundError: If the model version does not exist or
+            RepositoryNotFoundError: If the model version does not exist or
                 has been soft-deleted.
         """
         with repository_operation("Unable to transition stage."):
@@ -243,7 +243,7 @@ class ModelVersionRepository:
                 return_document=ReturnDocument.AFTER,
             )
         if document is None:
-            raise ModelVersionNotFoundError(f"{registered_model_id}:{version}")
+            raise RepositoryNotFoundError(f"{registered_model_id}:{version}")
 
         return ModelVersionRecord.from_document(document)
 
@@ -325,7 +325,7 @@ class ModelVersionRepository:
             The redacted, soft-deleted :class:`ModelVersionRecord`.
 
         Raises:
-            ModelVersionNotFoundError: If the model version does not exist or
+            RepositoryNotFoundError: If the model version does not exist or
                 has already been soft-deleted.
         """
         with repository_operation("Unable to soft delete."):
@@ -350,7 +350,7 @@ class ModelVersionRepository:
                 return_document=ReturnDocument.AFTER,
             )
         if document is None:
-            raise ModelVersionNotFoundError(f"{registered_model_id}:{version}")
+            raise RepositoryNotFoundError(f"{registered_model_id}:{version}")
 
         return ModelVersionRecord.from_document(document)
 
@@ -391,7 +391,7 @@ class ModelVersionRepository:
             The updated :class:`ModelVersionRecord`.
 
         Raises:
-            ModelVersionNotFoundError: If the model version does not exist or
+            RepositoryNotFoundError: If the model version does not exist or
                 has been soft-deleted.
         """
         update = build_replace_array_element_pipeline(
@@ -410,7 +410,7 @@ class ModelVersionRepository:
                 return_document=ReturnDocument.AFTER,
             )
         if document is None:
-            raise ModelVersionNotFoundError(f"{registered_model_id}:{version}")
+            raise RepositoryNotFoundError(f"{registered_model_id}:{version}")
 
         return ModelVersionRecord.from_document(document)
 
@@ -432,7 +432,7 @@ class ModelVersionRepository:
             The updated :class:`ModelVersionRecord`.
 
         Raises:
-            ModelVersionNotFoundError: If the model version does not exist or
+            RepositoryNotFoundError: If the model version does not exist or
                 has been soft-deleted.
         """
         update = build_remove_array_element_update(
@@ -451,7 +451,7 @@ class ModelVersionRepository:
                 return_document=ReturnDocument.AFTER,
             )
         if document is None:
-            raise ModelVersionNotFoundError(f"{registered_model_id}:{version}")
+            raise RepositoryNotFoundError(f"{registered_model_id}:{version}")
 
         return ModelVersionRecord.from_document(document)
 
@@ -497,8 +497,9 @@ class ModelVersionRepository:
             ``True`` if the registered model exists and owns the specified
             non-deleted version; otherwise, ``False``.
         """
-        with repository_operation("Unable to check model-version existence."):
-            documents = self._registered_models_collection.aggregate(
+        with (
+            repository_operation("Unable to check model-version existence."),
+            self._registered_models_collection.aggregate(
                 [
                     {
                         "$match": {"name": registered_model_name},
@@ -526,7 +527,8 @@ class ModelVersionRepository:
                     {"$project": {"_id": True}},
                     {"$limit": 1},
                 ]
-            )
+            ) as documents,
+        ):
             document = next(documents, None)
         return document is not None
 
@@ -547,8 +549,9 @@ class ModelVersionRepository:
             :class:`ModelVersionRecord` for each requested stage, ordered by
             version number descending.
         """
-        with repository_operation("Unable to find latest by stages."):
-            documents = self._collection.aggregate(
+        with (
+            repository_operation("Unable to find latest by stages."),
+            self._collection.aggregate(
                 [
                     {
                         "$match": {
@@ -561,8 +564,9 @@ class ModelVersionRepository:
                     {"$replaceRoot": {"newRoot": "$record"}},
                     {"$sort": {"version": DESCENDING}},
                 ]
-            )
-            documents = list(documents)
+            ) as cursor,
+        ):
+            documents = list(cursor)
         return tuple(ModelVersionRecord.from_document(document) for document in documents)
 
     def search(
@@ -657,8 +661,11 @@ class ModelVersionRepository:
         # Fetch one extra record to determine whether another page exists.
         pipeline.append({"$limit": max_results + 1})
 
-        with repository_operation("Unable to search."):
-            documents = list(self._collection.aggregate(pipeline))
+        with (
+            repository_operation("Unable to search."),
+            self._collection.aggregate(pipeline) as cursor,
+        ):
+            documents = list(cursor)
         has_more = len(documents) > max_results
         records = tuple(
             ModelVersionSearchResult(
@@ -740,11 +747,10 @@ class ModelVersionRepository:
         value: str | int | float | tuple[str, ...],
     ) -> dict[str, Any]:
         condition = cls._build_value_condition(comparator, value)
-        if comparator != "!=":
+        if comparator not in ("!=", "NOT IN"):
             return {field: condition}
 
-        # SQL comparisons against NULL are unknown rather than true. MongoDB's `$ne` also matches
-        # a missing field, so explicitly require a stored, non-null value for equivalent behavior.
+        # Exclude null and missing fields from negative comparisons.
         return {
             "$and": [
                 {field: {"$exists": True}},
@@ -758,7 +764,7 @@ class ModelVersionRepository:
         comparator: str,
         value: str | int | float | tuple[str, ...],
     ):
-        if comparator not in ("=", "!=", "IN", ">", ">=", "<", "<=", "LIKE", "ILIKE"):
+        if comparator not in ("=", "!=", "IN", "NOT IN", ">", ">=", "<", "<=", "LIKE", "ILIKE"):
             raise ValueError(f"Unsupported model-version comparator: {comparator}")
 
         return build_value_condition(comparator, value)
