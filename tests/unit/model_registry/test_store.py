@@ -9,10 +9,12 @@ from mlflow.entities.model_registry.model_version_stages import ALL_STAGES
 from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import (
     INTERNAL_ERROR,
+    INVALID_PARAMETER_VALUE,
     RESOURCE_ALREADY_EXISTS,
     RESOURCE_DOES_NOT_EXIST,
     ErrorCode,
 )
+from mlflow.tracking.registry import UnsupportedModelRegistryStoreURIException
 
 from mlflow_mongodb.infrastructure.errors import (
     RepositoryAlreadyExistsError,
@@ -48,6 +50,49 @@ def test_tracking_client_is_lazy_and_cached(monkeypatch):
     client_factory.assert_called_once_with(
         tracking_uri="http://tracking.example",
     )
+
+
+@pytest.mark.parametrize("use_explicit_uri", [True, False])
+def test_create_model_version_redacts_unsupported_tracking_uri(
+    store,
+    registered_model_repository,
+    model_version_repository,
+    monkeypatch,
+    caplog,
+    use_explicit_uri,
+):
+    uri = (
+        "unsupported-mongodb://fake-user:fake-password@private-host/private-database"
+        "?token=private-token#private-fragment"
+    )
+    monkeypatch.setattr("mlflow.tracking._tracking_service.utils._tracking_uri", None)
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", uri)
+    store.tracking_uri = uri if use_explicit_uri else None
+    # Exercise real client initialization and backend selection, not a mocked failure.
+    store.__dict__.pop("_tracking_client")
+
+    with pytest.raises(UnsupportedModelRegistryStoreURIException) as caught:
+        store.create_model_version(MODEL_NAME, SOURCE, model_id="m-123")
+
+    assert caught.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
+    assert "unsupported-mongodb://***" in caught.value.message
+    assert caught.value.supported_uri_schemes
+    for secret in (
+        "fake-user",
+        "fake-password",
+        "private-host",
+        "private-database",
+        "private-token",
+        "private-fragment",
+    ):
+        assert secret not in str(caught.value)
+        assert secret not in caplog.text
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True
+    assert "_tracking_client" not in store.__dict__
+    registered_model_repository.find_by_name.assert_not_called()
+    registered_model_repository.allocate_next_version.assert_not_called()
+    model_version_repository.create.assert_not_called()
 
 
 def test_create_registered_model_converts_entity(
