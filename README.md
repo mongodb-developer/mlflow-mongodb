@@ -10,11 +10,8 @@ Licensed under the [Apache License 2.0](LICENSE).
 ## Installation
 
 ```bash
-python -m pip install --pre mlflow-mongodb
+python -m pip install mlflow-mongodb
 ```
-
-The `--pre` flag is needed while the project is in pre-release. It will no longer be required
-once the first stable release is published.
 
 ### Supported versions
 
@@ -26,8 +23,7 @@ once the first stable release is published.
 | MongoDB   | 8.0 (replica set) | 8.0                          |
 
 Every pull request and release is tested against both the minimum and the latest of these
-combinations. The currently published pre-release still installs on Python 3.10; the next
-release requires 3.11.
+combinations.
 
 ## Running MLflow
 
