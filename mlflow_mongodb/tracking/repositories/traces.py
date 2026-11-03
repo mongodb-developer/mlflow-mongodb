@@ -6,7 +6,7 @@ import json
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Any, ClassVar, Final
 
@@ -1307,7 +1307,7 @@ class TraceRepository:
                 continue
             if cls._TIME_BUCKET_LABEL in dimensions:
                 dimensions[cls._TIME_BUCKET_LABEL] = datetime.fromtimestamp(
-                    float(dimensions[cls._TIME_BUCKET_LABEL]) / 1000, tz=timezone.utc
+                    float(dimensions[cls._TIME_BUCKET_LABEL]) / 1000, tz=UTC
                 ).isoformat()
             values = {
                 str(aggregation): row[f"agg_{index}"]

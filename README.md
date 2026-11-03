@@ -12,7 +12,7 @@ while the other uses another MLflow backend.
 
 ## Installation
 
-Python 3.10 or newer, MLflow 3.5 or newer within the 3.x series, and MongoDB 8.0 or newer
+Python 3.11 or newer, MLflow 3.5 or newer within the 3.x series, and MongoDB 8.0 or newer
 are required.
 
 ```bash

@@ -50,14 +50,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Minimum — Python 3.10, MLflow 3.5, PyMongo 4.0, MongoDB 8.0
-            python_version: "3.10"
+          - name: Minimum — Python 3.11, MLflow 3.5, PyMongo 4.0, MongoDB 8.0
+            python_version: "3.11"
             mlflow_spec: mlflow==3.5.0
             pymongo_spec: pymongo==4.0.0
+            # MLflow allows sqlalchemy<3, but 2.1 removes
+            # FallbackAsyncAdaptedQueuePool that mlflow.store.db.utils imports.
+            sqlalchemy_spec: "sqlalchemy<2.1"
           - name: Current — Python 3.14, latest MLflow 3.x and PyMongo 4.x, MongoDB 8.0
             python_version: "3.14"
             mlflow_spec: mlflow>=3.5,<4
             pymongo_spec: pymongo>=4.9,<5
+            sqlalchemy_spec: "sqlalchemy"
     env:
       MONGODB_URI: mongodb://localhost:27017/mlflow_ci_test?replicaSet=test-rs
     steps:
@@ -121,9 +125,10 @@ jobs:
         env:
           MLFLOW_SPEC: ${{ matrix.mlflow_spec }}
           PYMONGO_SPEC: ${{ matrix.pymongo_spec }}
+          SQLALCHEMY_SPEC: ${{ matrix.sqlalchemy_spec }}
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[dev]" "$MLFLOW_SPEC" "$PYMONGO_SPEC"
+          python -m pip install -e ".[dev]" "$MLFLOW_SPEC" "$PYMONGO_SPEC" "$SQLALCHEMY_SPEC"
 
       - name: Show installed versions
         run: >-
@@ -133,7 +138,7 @@ jobs:
           print('PyMongo', pymongo.__version__)"
 
       - name: Run unit and functional tests
-        if: matrix.python_version == '3.10'
+        if: matrix.python_version == '3.11'
         run: python -m pytest tests/unit tests/functional
 
       - name: Run unit and functional tests with coverage

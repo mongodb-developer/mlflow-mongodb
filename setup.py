@@ -13,7 +13,7 @@ setup(
     long_description_content_type="text/markdown",
     url="https://github.com/mongodb-developer/mlflow-mongodb",
     packages=find_packages(exclude=("tests", "tests.*")),
-    python_requires=">=3.10",
+    python_requires=">=3.11",
     install_requires=[
         # Temporary workaround for https://github.com/mlflow/mlflow/pull/25559.
         # Remove once the upstream WSGI code is fixed or MLflow lifts the version block.
@@ -43,7 +43,6 @@ setup(
     classifiers=[
         "Development Status :: 2 - Pre-Alpha",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
         "Programming Language :: Python :: 3.13",
