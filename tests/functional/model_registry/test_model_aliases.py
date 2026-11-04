@@ -7,16 +7,11 @@ from mlflow.protos.databricks_pb2 import (
     RESOURCE_DOES_NOT_EXIST,
     ErrorCode,
 )
-from mlflow.utils import validation as mlflow_validation
 
 from mlflow_mongodb.infrastructure.errors import RepositoryNotFoundError
 from mlflow_mongodb.model_registry.store import MongoDBModelRegistryStore
 
 MODEL_NAME = "mongodb-functional-alias-model"
-SUPPORTS_LATEST_ALIAS_LOOKUP = hasattr(
-    mlflow_validation,
-    "_validate_model_alias_name_reserved",
-)
 
 
 @pytest.fixture
@@ -33,10 +28,6 @@ def model_versions(store: MongoDBModelRegistryStore):
     return first_version, second_version
 
 
-@pytest.mark.skipif(
-    not SUPPORTS_LATEST_ALIAS_LOOKUP,
-    reason="MLflow before 3.3 rejects the reserved latest alias during basic validation",
-)
 def test_latest_alias_resolves_without_being_stored(
     store: MongoDBModelRegistryStore,
     model_versions,
@@ -50,10 +41,6 @@ def test_latest_alias_resolves_without_being_stored(
     assert store.get_registered_model(MODEL_NAME).aliases == {}
 
 
-@pytest.mark.skipif(
-    not SUPPORTS_LATEST_ALIAS_LOOKUP,
-    reason="MLflow before 3.3 rejects the reserved latest alias during basic validation",
-)
 def test_latest_alias_raises_when_model_has_no_versions(store: MongoDBModelRegistryStore):
     store.create_registered_model(MODEL_NAME)
 
@@ -61,24 +48,11 @@ def test_latest_alias_raises_when_model_has_no_versions(store: MongoDBModelRegis
         store.get_model_version_by_alias(MODEL_NAME, "latest")
 
 
-@pytest.mark.skipif(
-    not SUPPORTS_LATEST_ALIAS_LOOKUP,
-    reason="MLflow before 3.3 rejects the reserved latest alias during basic validation",
-)
 def test_latest_alias_raises_when_model_does_not_exist(store: MongoDBModelRegistryStore):
     with pytest.raises(MlflowException, match="Registered Model.*not found") as missing_error:
         store.get_model_version_by_alias(f"{MODEL_NAME}-missing", "latest")
 
     assert missing_error.value.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST)
-
-
-@pytest.mark.skipif(
-    SUPPORTS_LATEST_ALIAS_LOOKUP,
-    reason="MLflow 3.3 and newer support latest as a virtual lookup alias",
-)
-def test_mlflow_before_3_3_rejects_latest_alias_lookup(store: MongoDBModelRegistryStore):
-    with pytest.raises(MlflowException, match="latest.*reserved"):
-        store.get_model_version_by_alias(MODEL_NAME, "latest")
 
 
 def test_latest_alias_cannot_be_stored(

@@ -2,19 +2,10 @@
 
 import pytest
 from mlflow.exceptions import MlflowException
-from mlflow.utils import validation as mlflow_validation
 
 MODEL_NAME = "fraud-detector"
-SUPPORTS_LATEST_ALIAS_LOOKUP = hasattr(
-    mlflow_validation,
-    "_validate_model_alias_name_reserved",
-)
 
 
-@pytest.mark.skipif(
-    not SUPPORTS_LATEST_ALIAS_LOOKUP,
-    reason="MLflow before 3.3 rejects the reserved latest alias during basic validation",
-)
 def test_get_latest_alias_returns_latest_version_without_stored_alias(
     store,
     registered_model_repository,
@@ -46,10 +37,6 @@ def test_get_latest_alias_returns_latest_version_without_stored_alias(
     model_version_repository.find_by_version.assert_not_called()
 
 
-@pytest.mark.skipif(
-    not SUPPORTS_LATEST_ALIAS_LOOKUP,
-    reason="MLflow before 3.3 rejects the reserved latest alias during basic validation",
-)
 def test_get_latest_alias_raises_when_model_has_no_versions(
     store,
     registered_model_repository,
