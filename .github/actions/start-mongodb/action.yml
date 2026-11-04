@@ -37,6 +37,9 @@ runs:
           -e GLIBC_TUNABLES=glibc.pthread.rseq=1 \
           "mongo:${MONGODB_VERSION}" --replSet "${REPLICA_SET}" --bind_ip_all
 
+        # mongosh is run with HOME=/tmp: the image sets HOME=/data/db, and the
+        # entrypoint's recursive chown of that directory fails (killing the
+        # container) if mongosh drops a lock file there while it is running.
         fail_if_exited() {
           if [ "$(docker inspect -f '{{.State.Running}}' mongodb)" != "true" ]; then
             docker logs mongodb
@@ -47,19 +50,19 @@ runs:
         # Wait for mongod to accept connections.
         for _ in $(seq 1 30); do
           fail_if_exited
-          if docker exec mongodb mongosh --quiet --eval "db.adminCommand('ping').ok" | grep -q 1; then
+          if docker exec -e HOME=/tmp mongodb mongosh --quiet --eval "db.adminCommand('ping').ok" | grep -q 1; then
             break
           fi
           sleep 1
         done
 
-        docker exec mongodb mongosh --quiet --eval \
+        docker exec -e HOME=/tmp mongodb mongosh --quiet --eval \
           "rs.initiate({_id: '${REPLICA_SET}', members: [{_id: 0, host: 'localhost:27017'}]})"
 
         # Wait for the replica set to reach PRIMARY state.
         for _ in $(seq 1 30); do
           fail_if_exited
-          if docker exec mongodb mongosh --quiet --eval \
+          if docker exec -e HOME=/tmp mongodb mongosh --quiet --eval \
             "try { rs.status().myState } catch (e) { 0 }" | grep -q 1; then
             exit 0
           fi
