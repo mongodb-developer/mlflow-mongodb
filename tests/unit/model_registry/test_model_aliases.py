@@ -5,10 +5,10 @@ from mlflow.exceptions import MlflowException
 from mlflow.utils import validation as mlflow_validation
 
 MODEL_NAME = "fraud-detector"
+# MLflow 3.18 renamed _validate_model_alias_name_reserved to _validate_alias_name_reserved.
 SUPPORTS_LATEST_ALIAS_LOOKUP = hasattr(
-    mlflow_validation,
-    "_validate_model_alias_name_reserved",
-)
+    mlflow_validation, "_validate_model_alias_name_reserved"
+) or hasattr(mlflow_validation, "_validate_alias_name_reserved")
 
 
 @pytest.mark.skipif(

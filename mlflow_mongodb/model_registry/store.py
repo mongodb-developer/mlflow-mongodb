@@ -43,7 +43,6 @@ from mlflow.tracking.client import MlflowClient
 from mlflow.utils.search_utils import SearchModelUtils, SearchModelVersionUtils, SearchUtils
 from mlflow.utils.time import get_current_time_millis
 from mlflow.utils.validation import (
-    _validate_model_alias_name,
     _validate_model_name,
     _validate_model_renaming,
     _validate_model_version,
@@ -85,17 +84,29 @@ from mlflow_mongodb.model_registry.types import (
 
 logger = logging.getLogger(__name__)
 
+# MLflow 3.18 renamed the alias validators to _validate_alias_name and
+# _validate_alias_name_reserved; earlier releases use the model-specific names.
 try:
-    from mlflow.utils.validation import (
-        _REGISTERED_MODEL_ALIAS_LATEST,
-        _validate_model_alias_name_reserved,
-    )
+    from mlflow.utils.validation import _validate_model_alias_name
 except ImportError:
-    # MLflow versions before 3.3 perform this check inside _validate_model_alias_name.
+    from mlflow.utils.validation import _validate_alias_name as _validate_model_alias_name
+
+try:
+    from mlflow.utils.validation import _REGISTERED_MODEL_ALIAS_LATEST
+except ImportError:
     _REGISTERED_MODEL_ALIAS_LATEST = "latest"
 
-    def _validate_model_alias_name_reserved(_alias):
-        return None
+try:
+    from mlflow.utils.validation import _validate_model_alias_name_reserved
+except ImportError:
+    try:
+        from mlflow.utils.validation import (
+            _validate_alias_name_reserved as _validate_model_alias_name_reserved,
+        )
+    except ImportError:
+        # MLflow versions before 3.3 perform this check inside _validate_model_alias_name.
+        def _validate_model_alias_name_reserved(_alias):
+            return None
 
 
 class MongoDBModelRegistryStore(AbstractStore):

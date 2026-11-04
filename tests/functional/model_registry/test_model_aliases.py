@@ -13,10 +13,10 @@ from mlflow_mongodb.infrastructure.errors import RepositoryNotFoundError
 from mlflow_mongodb.model_registry.store import MongoDBModelRegistryStore
 
 MODEL_NAME = "mongodb-functional-alias-model"
+# MLflow 3.18 renamed _validate_model_alias_name_reserved to _validate_alias_name_reserved.
 SUPPORTS_LATEST_ALIAS_LOOKUP = hasattr(
-    mlflow_validation,
-    "_validate_model_alias_name_reserved",
-)
+    mlflow_validation, "_validate_model_alias_name_reserved"
+) or hasattr(mlflow_validation, "_validate_alias_name_reserved")
 
 
 @pytest.fixture
