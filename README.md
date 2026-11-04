@@ -15,15 +15,15 @@ python -m pip install mlflow-mongodb
 
 ### Supported versions
 
-| Component | Minimum           | Tested up to                 |
-| --------- | ----------------- | ---------------------------- |
-| Python    | 3.11              | 3.14                         |
-| MLflow    | 3.5               | latest 3.x (4.x unsupported) |
-| PyMongo   | 4.0               | latest 4.x                   |
-| MongoDB   | 8.0 (replica set) | 8.0                          |
+| Component | Minimum | Tested up to |
+| --------- | ------- | ------------ |
+| Python    | 3.11    | 3.14         |
+| MLflow    | 3.5     | 3.17         |
+| PyMongo   | 4.0     | 4.19         |
+| MongoDB   | 8.0     | 8.0          |
 
-Every pull request and release is tested against both the minimum and the latest of these
-combinations.
+MLflow 4.x is not supported. Every pull request and release is tested against both the minimum
+and the latest of these combinations.
 
 ## Running MLflow
 
@@ -106,7 +106,7 @@ yet stable and may change between releases. `main` always carries a `.devN` vers
 Releases are published to [PyPI](https://pypi.org/project/mlflow-mongodb/) through PyPI's
 trusted publishing, so no long-lived upload credentials exist. Each
 [GitHub release](https://github.com/mongodb-developer/mlflow-mongodb/releases) also carries the
-wheel and source distribution, a detached PGP signature (`.sig`) for each, and a `SHA256SUMS`
+wheel and source distribution, a detached GPG signature (`.sig`) for each, and a `SHA256SUMS`
 file.
 
 The signatures are made with MongoDB's Garasign service using this key:
@@ -176,8 +176,9 @@ The unit tests need no database:
 python -m pytest tests/unit
 ```
 
-The functional tests use a real MongoDB 8.0 or newer server. Set `MONGODB_URI` to a dedicated
-test database; for example:
+The functional tests use a real MongoDB 8.0 or newer server; a standalone server is fine, and CI
+runs them against a single-node replica set. Set `MONGODB_URI` to a dedicated test database; for
+example:
 
 ```bash
 export MONGODB_URI="mongodb://localhost:27017/mlflow_functional_test"
@@ -185,7 +186,7 @@ python -m pytest tests/functional
 ```
 
 Authentication, replica-set, TLS, and other standard MongoDB URI options can be included in
-`MONGODB_URI`. Use a MongoDB 8.0 replica set when running tests that exercise MongoDB transactions.
+`MONGODB_URI`.
 
 The functional suite deletes documents from its application collections after every test so
 their indexes can be reused. At the end of the test session, it drops the database selected by
