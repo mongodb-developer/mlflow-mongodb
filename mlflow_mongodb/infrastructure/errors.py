@@ -2,6 +2,21 @@
 
 from collections.abc import Collection
 from typing import Literal
+from urllib.parse import urlsplit
+
+
+def redact_uri(uri: str | None) -> str:
+    """Show only a parsed scheme, or a fixed placeholder for malformed input."""
+    invalid = "<invalid or redacted URI>"
+    if not isinstance(uri, str):
+        return invalid
+    try:
+        parsed = urlsplit(uri)
+    except ValueError:
+        return invalid
+    if not parsed.scheme or not parsed.netloc or not uri.lower().startswith(f"{parsed.scheme}://"):
+        return invalid
+    return f"{parsed.scheme}://***"
 
 
 class RepositoryAlreadyExistsError(Exception):

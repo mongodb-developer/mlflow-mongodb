@@ -39,11 +39,15 @@ from mlflow.store.model_registry import (
     SEARCH_REGISTERED_MODEL_MAX_RESULTS_THRESHOLD,
 )
 from mlflow.store.model_registry.abstract_store import AbstractStore
+from mlflow.tracking._tracking_service.utils import (
+    _resolve_tracking_uri as resolve_tracking_uri,
+)
 from mlflow.tracking.client import MlflowClient
+from mlflow.tracking.registry import UnsupportedModelRegistryStoreURIException
 from mlflow.utils.search_utils import SearchModelUtils, SearchModelVersionUtils, SearchUtils
 from mlflow.utils.time import get_current_time_millis
 from mlflow.utils.validation import (
-    _validate_model_alias_name,
+    _REGISTERED_MODEL_ALIAS_LATEST,
     _validate_model_name,
     _validate_model_renaming,
     _validate_model_version,
@@ -62,6 +66,7 @@ from mlflow_mongodb.infrastructure.errors import (
     RepositoryNotFoundError,
     RepositoryUnsupportedComparatorError,
     RepositoryUnsupportedFieldTypeError,
+    redact_uri,
 )
 from mlflow_mongodb.infrastructure.search_filters import (
     ConfiguredSearchFilterValidator,
@@ -87,15 +92,17 @@ logger = logging.getLogger(__name__)
 
 try:
     from mlflow.utils.validation import (
-        _REGISTERED_MODEL_ALIAS_LATEST,
-        _validate_model_alias_name_reserved,
+        _validate_alias_name as _validate_model_alias_name,
+    )
+    from mlflow.utils.validation import (
+        _validate_alias_name_reserved as _validate_model_alias_name_reserved,
     )
 except ImportError:
-    # MLflow versions before 3.3 perform this check inside _validate_model_alias_name.
-    _REGISTERED_MODEL_ALIAS_LATEST = "latest"
-
-    def _validate_model_alias_name_reserved(_alias):
-        return None
+    # Older supported MLflow versions use model-specific validator names.
+    from mlflow.utils.validation import (
+        _validate_model_alias_name,
+        _validate_model_alias_name_reserved,
+    )
 
 
 class MongoDBModelRegistryStore(AbstractStore):
@@ -155,7 +162,15 @@ class MongoDBModelRegistryStore(AbstractStore):
 
     @cached_property
     def _tracking_client(self):
-        return MlflowClient(tracking_uri=self.tracking_uri)
+        tracking_uri = resolve_tracking_uri(self.tracking_uri)
+        try:
+            return MlflowClient(tracking_uri=tracking_uri)
+        except UnsupportedModelRegistryStoreURIException as exc:
+            logger.error("Unable to initialize tracking client: %s", type(exc).__name__)
+            raise UnsupportedModelRegistryStoreURIException(
+                unsupported_uri=redact_uri(tracking_uri),
+                supported_uri_schemes=exc.supported_uri_schemes,
+            ) from None
 
     def _to_mlflow_registered_model_details(
         self,
