@@ -65,6 +65,12 @@ depend on the installed MLflow version. Older versions preserve native MLflow sp
 newer OTel translations, and derive cost summaries only when MLflow provides its cost aggregator.
 These limitations do not disable run metric logging.
 
+Prompt-to-trace links store the prompt name and version without its registry URI.
+The tracking store checks that the trace exists but does not look up the prompt; direct
+tracking-store calls can therefore persist references to nonexistent prompts. Registry-store
+linking validates prompts against that registry before forwarding the association. Names and
+versions shared by different registries remain ambiguous.
+
 ## Documentation
 
 New to MLflow? Start with the [MLflow Tracking Quickstart](https://mlflow.org/docs/latest/ml/getting-started/quickstart/).

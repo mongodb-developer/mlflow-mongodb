@@ -330,27 +330,46 @@ def test_batch_complete_reads_omit_empty_and_partially_exported_traces(
     assert store.get_trace(empty.trace_id, allow_partial=True).data.spans == []
 
 
-def test_trace_tags_and_links_are_idempotent_and_preserve_literal_values(store, trace):
+def test_trace_tags_and_links_are_idempotent_and_preserve_literal_values(store, trace, run):
     store.set_trace_tag(trace.trace_id, "team.name", "$risk")
     store.set_trace_tag(trace.trace_id, "team.name", "$risk")
     store.set_trace_tag(trace.trace_id, "remove", "value")
     store.delete_trace_tag(trace.trace_id, "remove")
-    request = LinkTracesToRun(trace_ids=[trace.trace_id, "tr-missing"], run_id="run")
+    request = LinkTracesToRun(trace_ids=[trace.trace_id, trace.trace_id], run_id=run.info.run_id)
     store.link_traces_to_run(request.trace_ids, request.run_id)
     store.link_traces_to_run(request.trace_ids, request.run_id)
     refs = [{"name": "greeting", "version": "1"}]
-    store._trace_repository.link_prompts(trace_id=trace.trace_id, prompt_versions=refs)
-    store._trace_repository.link_prompts(trace_id=trace.trace_id, prompt_versions=refs)
+    store.link_prompts_to_trace(
+        trace.trace_id, [PromptVersion(name="greeting", version=1, template="Hello")]
+    )
+    store.link_prompts_to_trace(
+        trace.trace_id, [PromptVersion(name="greeting", version=1, template="Hello")]
+    )
 
     loaded = store.get_trace_info(trace.trace_id)
     document = store._trace_repository._collection.find_one({"_id": trace.trace_id})
 
     assert loaded.tags["team.name"] == "$risk"
     assert "remove" not in loaded.tags
-    assert document["run_ids"] == ["run"]
+    assert document["run_ids"] == [run.info.run_id]
     assert document["linked_prompts"] == refs
     assert len([tag for tag in document["tags"] if tag["k"] == "team.name"]) == 1
-    assert list(request.trace_ids) == [trace.trace_id, "tr-missing"]
+    assert list(request.trace_ids) == [trace.trace_id, trace.trace_id]
+
+
+@pytest.mark.parametrize(
+    "trace_ids",
+    [("tr-missing", "{trace_id}"), ("{trace_id}", "tr-missing")],
+)
+def test_missing_trace_rejects_run_link_batch_without_writing(store, trace, run, trace_ids):
+    requested_ids = [trace_id.format(trace_id=trace.trace_id) for trace_id in trace_ids]
+
+    with pytest.raises(MlflowException) as caught:
+        store.link_traces_to_run(requested_ids, run.info.run_id)
+
+    assert caught.value.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST)
+    document = store._trace_repository._collection.find_one({"_id": trace.trace_id})
+    assert document["run_ids"] == []
     assert store._trace_repository._collection.count_documents({"_id": "tr-missing"}) == 0
 
 

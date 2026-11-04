@@ -127,8 +127,11 @@ def run_store(
     experiment_repository,
     experiment_record_factory,
     run_record_factory,
+    logged_model_repository,
 ):
     store.__dict__["_run_repository"] = run_repository
+    store.__dict__["_logged_model_repository"] = logged_model_repository
+    logged_model_repository.find_existing_ids.return_value = set()
     experiment_repository.find_by_id.return_value = experiment_record_factory()
     for method in ("create", "find_by_id", "update_info", "mark_deleted", "restore"):
         getattr(run_repository, method).return_value = run_record_factory()
@@ -217,8 +220,17 @@ def trace_record_factory():
 
 
 @pytest.fixture
-def trace_store(store, trace_repository, trace_record_factory, experiment_record_factory):
+def trace_store(
+    store,
+    trace_repository,
+    trace_record_factory,
+    experiment_record_factory,
+    run_repository,
+    run_record_factory,
+):
     store.__dict__["_trace_repository"] = trace_repository
+    store.__dict__["_run_repository"] = run_repository
+    run_repository.find_by_id.return_value = run_record_factory()
     store._experiment_repository.find_by_id.return_value = experiment_record_factory()
     trace_repository.start_trace.return_value = trace_record_factory()
     trace_repository.get_trace_info.return_value = trace_record_factory()
