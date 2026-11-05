@@ -1,23 +1,29 @@
 # MongoDB Backend for MLflow
 
-> [WARNING]
-> This project is under active development and has not reached a stable release. APIs, storage
-> formats, and configuration may change at any time without notice. **It is not intended for
-> production use.** See [LICENSE](LICENSE) for the full disclaimer of warranties.
-
 An MLflow plugin that stores tracking data (experiments, runs, traces, and logged models) and
 model registry data (registered models, versions, aliases, tags, and prompts) in MongoDB. The
 tracking store and registry store are configured independently, so either one can use MongoDB
 while the other uses another MLflow backend.
 
+Licensed under the [Apache License 2.0](LICENSE).
+
 ## Installation
 
-Python 3.11 or newer, MLflow 3.5 or newer within the 3.x series, and MongoDB 8.0 or newer
-are required.
-
 ```bash
-python -m pip install "mlflow-mongodb>=0.1.0b2"
+python -m pip install mlflow-mongodb
 ```
+
+### Supported versions
+
+| Component | Minimum | Tested up to |
+| --------- | ------- | ------------ |
+| Python    | 3.11    | 3.14         |
+| MLflow    | 3.5     | 3.17         |
+| PyMongo   | 4.0     | 4.19         |
+| MongoDB   | 8.0     | 8.0          |
+
+MLflow 4.x is not supported. Every pull request and release is tested against both the minimum
+and the latest of these combinations.
 
 ## Running MLflow
 
@@ -44,10 +50,12 @@ export MLFLOW_TRACKING_URI="http://127.0.0.1:5000"
 
 The MongoDB URI must include the database name; `mlflow` is the database name in the example
 above. Authentication, replica-set, TLS, and other connection options can be provided using
-standard MongoDB URI syntax. For example:
+standard MongoDB URI syntax. Both `mongodb://` and `mongodb+srv://` schemes are supported, so a
+MongoDB Atlas connection string works unchanged. For example:
 
 ```text
 mongodb://username:password@mongo.example.com:27017/mlflow?authSource=admin
+mongodb+srv://username:password@cluster0.example.mongodb.net/mlflow
 ```
 
 When using the MongoDB tracking backend, MLflow 3.5 clients upload full trace payloads to
@@ -75,12 +83,53 @@ The following guides provide additional context for using this plugin:
 - [Tracking Server Configuration](https://mlflow.org/docs/latest/self-hosting/architecture/tracking-server/) — configure tracking and registry stores independently.
 - [MongoDB Connection Strings](https://www.mongodb.com/docs/manual/reference/connection-string/) — configure authentication, TLS, replica sets, and other URI options.
 
+## Reporting issues
+
+Bug reports and feature requests are tracked in
+[GitHub Issues](https://github.com/mongodb-developer/mlflow-mongodb/issues). When reporting a
+bug, include the MLflow, PyMongo, MongoDB, and `mlflow-mongodb` versions, the server command you
+ran, and a minimal reproduction. Do not include connection strings or credentials.
+
+Security vulnerabilities must not be filed as public issues. Report them through
+[MongoDB's vulnerability reporting process](https://www.mongodb.com/docs/manual/tutorial/create-a-vulnerability-report/)
+instead.
+
 ## Versioning
 
 This project follows [Semantic Versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`), same as
 [MLflow](https://mlflow.org/) itself. It's currently on major version `0`, meaning the API isn't
 yet stable and may change between releases. `main` always carries a `.devN` version (e.g.
 `0.1.0.dev0`) to signal it's unreleased and ahead of the latest published version.
+
+## Verifying releases
+
+Releases are published to [PyPI](https://pypi.org/project/mlflow-mongodb/) through PyPI's
+trusted publishing, so no long-lived upload credentials exist. Each
+[GitHub release](https://github.com/mongodb-developer/mlflow-mongodb/releases) also carries the
+wheel and source distribution, a detached GPG signature (`.sig`) for each, and a `SHA256SUMS`
+file.
+
+The signatures are made with MongoDB's Garasign service using this key:
+
+|             |                                                     |
+| ----------- | --------------------------------------------------- |
+| Key         | `ai-builder-experience <packaging@mongodb.com>`     |
+| Fingerprint | `6E33 09C7 3676 2845 73EC 0E52 5994 2DBC 12A6 CD89` |
+| Public key  | <https://pgp.mongodb.com/ai-builder-experience.pub> |
+
+To verify a release, download the distribution, its `.sig`, and `SHA256SUMS` from the release
+page, import the key, and check the checksum and signature:
+
+```bash
+curl -sSLO https://pgp.mongodb.com/ai-builder-experience.pub
+gpg --import ai-builder-experience.pub
+sha256sum -c SHA256SUMS --ignore-missing
+gpg --verify mlflow_mongodb-<version>-py3-none-any.whl.sig mlflow_mongodb-<version>-py3-none-any.whl
+```
+
+Expect `Good signature from "ai-builder-experience <packaging@mongodb.com>"` and the fingerprint
+above. Compare the fingerprint against this README, not only against the downloaded key, so a
+swapped key cannot verify itself.
 
 ## Contributor setup
 
@@ -113,16 +162,23 @@ Run all formatting, linting, and repository checks with:
 pre-commit run --all-files
 ```
 
-## Functional tests
+## Running tests
 
-The functional tests use a real MongoDB 8.0 or newer server. Install the project in editable
-mode with its development dependencies before running them:
+Install the project in editable mode with its development dependencies first:
 
 ```bash
 python -m pip install -e ".[dev]"
 ```
 
-Set `MONGODB_URI` to a dedicated test database; for example:
+The unit tests need no database:
+
+```bash
+python -m pytest tests/unit
+```
+
+The functional tests use a real MongoDB 8.0 or newer server; a standalone server is fine, and CI
+runs them against a single-node replica set. Set `MONGODB_URI` to a dedicated test database; for
+example:
 
 ```bash
 export MONGODB_URI="mongodb://localhost:27017/mlflow_functional_test"
@@ -130,7 +186,7 @@ python -m pytest tests/functional
 ```
 
 Authentication, replica-set, TLS, and other standard MongoDB URI options can be included in
-`MONGODB_URI`. Use a MongoDB 8.0 replica set when running tests that exercise MongoDB transactions.
+`MONGODB_URI`.
 
 The functional suite deletes documents from its application collections after every test so
 their indexes can be reused. At the end of the test session, it drops the database selected by
