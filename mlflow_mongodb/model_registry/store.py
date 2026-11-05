@@ -91,14 +91,12 @@ from mlflow_mongodb.model_registry.types import (
 logger = logging.getLogger(__name__)
 
 try:
-    from mlflow.utils.validation import (
+    from mlflow.utils.validation import (  # ruff: ignore[unsorted-imports]
         _validate_alias_name as _validate_model_alias_name,
-    )
-    from mlflow.utils.validation import (
         _validate_alias_name_reserved as _validate_model_alias_name_reserved,
     )
 except ImportError:
-    # Older supported MLflow versions use model-specific validator names.
+    # MLflow < 3.18 uses model-specific validator names.
     from mlflow.utils.validation import (
         _validate_model_alias_name,
         _validate_model_alias_name_reserved,
