@@ -63,10 +63,10 @@ def mongodb_store(mongodb_uri: str) -> Iterator[MongoDBTrackingStore]:
         client.close()
         pytest.fail(f"Cannot connect to MongoDB using {MONGODB_URI_ENV_VAR}: {exc}")
 
-    if server_version < (8, 0):
+    if server_version < (7, 0):
         client.close()
         pytest.fail(
-            "MongoDB 8.0 or newer is required; "
+            "MongoDB 7.0 or newer is required; "
             f"the functional-test server reports {server_version[0]}.{server_version[1]}"
         )
 

@@ -50,15 +50,29 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - name: Minimum — Python 3.11, MLflow 3.5, PyMongo 4.0, MongoDB 7.0
+            python_version: "3.11"
+            mongodb_version: "7.0"
+            mlflow_spec: mlflow==3.5.0
+            pymongo_spec: pymongo==4.0.0
+            sqlalchemy_spec: "sqlalchemy<2.1"
           - name: Minimum — Python 3.11, MLflow 3.5, PyMongo 4.0, MongoDB 8.0
             python_version: "3.11"
+            mongodb_version: "8.0"
             mlflow_spec: mlflow==3.5.0
             pymongo_spec: pymongo==4.0.0
             # MLflow allows sqlalchemy<3, but 2.1 removes
             # FallbackAsyncAdaptedQueuePool that mlflow.store.db.utils imports.
             sqlalchemy_spec: "sqlalchemy<2.1"
+          - name: Current — Python 3.14, latest MLflow 3.x and PyMongo 4.x, MongoDB 7.0
+            python_version: "3.14"
+            mongodb_version: "7.0"
+            mlflow_spec: mlflow>=3.5,<4
+            pymongo_spec: pymongo>=4.9,<5
+            sqlalchemy_spec: "sqlalchemy"
           - name: Current — Python 3.14, latest MLflow 3.x and PyMongo 4.x, MongoDB 8.0
             python_version: "3.14"
+            mongodb_version: "8.0"
             mlflow_spec: mlflow>=3.5,<4
             pymongo_spec: pymongo>=4.9,<5
             sqlalchemy_spec: "sqlalchemy"
@@ -82,12 +96,14 @@ jobs:
       # 26.04 runner images) without it; see supercharge/mongodb-github-action#81
       # and https://jira.mongodb.org/browse/SERVER-121912. Switch back to the
       # action once it releases mongodb-extra-env.
-      - name: Start MongoDB 8.0 replica set
+      - name: Start MongoDB ${{ matrix.mongodb_version }} replica set
+        env:
+          MONGODB_VERSION: ${{ matrix.mongodb_version }}
         run: |
           set -eu
           docker run -d --name mongodb -p 27017:27017 \
             -e GLIBC_TUNABLES=glibc.pthread.rseq=1 \
-            mongo:8.0 --replSet test-rs --bind_ip_all
+            "mongo:${MONGODB_VERSION}" --replSet test-rs --bind_ip_all
 
           fail_if_exited() {
             if [ "$(docker inspect -f '{{.State.Running}}' mongodb)" != "true" ]; then
@@ -153,7 +169,7 @@ jobs:
         if: always() && matrix.python_version == '3.14'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: html-coverage-report
+          name: html-coverage-report-mongodb-${{ matrix.mongodb_version }}
           path: htmlcov/
           if-no-files-found: warn
           retention-days: 14
