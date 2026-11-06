@@ -20,7 +20,7 @@ python -m pip install mlflow-mongodb
 | Python    | 3.11    | 3.14         |
 | MLflow    | 3.5     | 3.17         |
 | PyMongo   | 4.0     | 4.19         |
-| MongoDB   | 8.0     | 8.0          |
+| MongoDB   | 7.0     | 8.0          |
 
 MLflow 4.x is not supported. Every pull request and release is tested against both the minimum
 and the latest of these combinations.
@@ -176,7 +176,7 @@ The unit tests need no database:
 python -m pytest tests/unit
 ```
 
-The functional tests use a real MongoDB 8.0 or newer server; a standalone server is fine, and CI
+The functional tests use a real MongoDB 7.0 or newer server; a standalone server is fine, and CI
 runs them against a single-node replica set. Set `MONGODB_URI` to a dedicated test database; for
 example:
 
