@@ -33,6 +33,14 @@ else:
     pytest.skip("Trace metric queries require MLflow 3.9 or newer", allow_module_level=True)
 
 
+try:
+    Feedback(value=None)
+except MlflowException:
+    SUPPORTS_NULL_FEEDBACK = False
+else:
+    SUPPORTS_NULL_FEEDBACK = True
+
+
 def test_trace_latency_groups_by_name_and_utc_time_bucket(store, trace_info_factory):
     for request_time, duration in ((0, 10), (1000, 30), (60_000, 50)):
         store.start_trace(
@@ -658,7 +666,20 @@ def test_feedback_value_updates_recalculate_numeric_aggregate(store, trace, valu
     assert result[0].values == {"AVG": expected}
 
 
-@pytest.mark.parametrize("value", ["unscored", None, {"answer": "yes"}])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "unscored",
+        pytest.param(
+            None,
+            marks=pytest.mark.skipif(
+                not SUPPORTS_NULL_FEEDBACK,
+                reason="Installed MLflow rejects feedback with neither a value nor an error",
+            ),
+        ),
+        {"answer": "yes"},
+    ],
+)
 def test_nonnumeric_feedback_update_clears_previous_numeric_aggregate(store, trace, value):
     created = store.create_assessment(Feedback(name="quality", value=7, trace_id=trace.trace_id))
 
