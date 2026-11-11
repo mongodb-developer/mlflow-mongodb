@@ -14,6 +14,29 @@ from mlflow.entities.assessment_source import AssessmentSource
 from mlflow.exceptions import MlflowException
 from mlflow.protos.databricks_pb2 import INVALID_PARAMETER_VALUE, RESOURCE_DOES_NOT_EXIST, ErrorCode
 
+from tests.functional.compat import SUPPORTS_NULL_FEEDBACK
+
+
+@pytest.mark.skipif(SUPPORTS_NULL_FEEDBACK, reason="Installed MLflow supports null feedback")
+def test_null_feedback_update_is_rejected_without_changing_stored_assessment(store, trace):
+    created = store.create_assessment(Feedback(name="quality", value=7, trace_id=trace.trace_id))
+    collection = store._trace_repository._assessments_collection
+    query = {"_id": created.assessment_id}
+    before = collection.find_one(query)
+
+    with pytest.raises(MlflowException) as caught:
+        store.update_assessment(
+            trace.trace_id,
+            created.assessment_id,
+            name="changed",
+            metadata={"new": "value"},
+            feedback=FeedbackValue(None),
+        )
+
+    assert caught.value.error_code == ErrorCode.Name(INVALID_PARAMETER_VALUE)
+    assert collection.find_one(query) == before
+    assert store.get_assessment(trace.trace_id, created.assessment_id).value == 7
+
 
 @pytest.mark.parametrize("value", [True, 7, 0.5, "$yes", [1, "a"], {"answer": [1, True]}])
 def test_feedback_create_get_and_trace_join_preserve_native_values(store, trace, value):
