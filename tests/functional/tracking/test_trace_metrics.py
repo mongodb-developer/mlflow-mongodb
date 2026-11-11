@@ -15,6 +15,7 @@ from mlflow_mongodb.tracking._compat import (  # ruff: ignore[import-private-nam
     SPAN_PROVIDER_ATTRIBUTE,
     TRACE_METRICS_AVAILABLE,
 )
+from tests.functional.compat import SUPPORTS_NULL_FEEDBACK
 
 if TRACE_METRICS_AVAILABLE:
     from mlflow.entities.trace_metrics import AggregationType, MetricAggregation, MetricViewType
@@ -31,14 +32,6 @@ if TRACE_METRICS_AVAILABLE:
     )
 else:
     pytest.skip("Trace metric queries require MLflow 3.9 or newer", allow_module_level=True)
-
-
-try:
-    Feedback(value=None)
-except MlflowException:
-    SUPPORTS_NULL_FEEDBACK = False
-else:
-    SUPPORTS_NULL_FEEDBACK = True
 
 
 def test_trace_latency_groups_by_name_and_utc_time_bucket(store, trace_info_factory):

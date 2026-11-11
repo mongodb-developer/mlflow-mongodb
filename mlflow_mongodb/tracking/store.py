@@ -1916,6 +1916,9 @@ class MongoDBTrackingStore(AbstractStore):
             )
         if feedback is not None and not isinstance(feedback, FeedbackValue):
             raise MlflowException.invalid_parameter_value("feedback must be a FeedbackValue.")
+        if feedback is not None and feedback.value is None and feedback.error is None:
+            # Apply the installed MLflow's null-feedback validation before persisting.
+            Feedback(value=None)
         updated = deepcopy(existing)
         updated.last_update_time_ms = get_current_time_millis()
         if name is not None:
