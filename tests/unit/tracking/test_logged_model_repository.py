@@ -97,6 +97,40 @@ def repository(collections, logged_model_document_factory):
     return LoggedModelRepository(database)
 
 
+@pytest.mark.parametrize("error_type", [OperationFailure, InvalidDocument])
+def test_existing_model_id_lookup_translates_query_failure(repository, collections, error_type):
+    failure = error_type("Private database details")
+    collections["logged_models"].find.side_effect = failure
+
+    with pytest.raises(RepositoryPersistenceError) as caught:
+        repository.find_existing_ids([MODEL_ID])
+
+    assert caught.value.__cause__ is failure
+
+
+@pytest.mark.parametrize("error_type", [OperationFailure, InvalidBSON])
+def test_existing_model_id_lookup_closes_cursor_on_partial_failure(
+    repository, collections, error_type
+):
+    failure = error_type("Private cursor details")
+
+    def documents():
+        yield {"_id": MODEL_ID}
+        raise failure
+
+    cursor = MagicMock()
+    cursor.__enter__.return_value = cursor
+    cursor.__iter__.return_value = documents()
+    collections["logged_models"].find.return_value = cursor
+
+    with pytest.raises(RepositoryPersistenceError) as caught:
+        repository.find_existing_ids([MODEL_ID, "m-other"])
+
+    assert caught.value.__cause__ is failure
+    cursor.__exit__.assert_called_once()
+    assert cursor.__exit__.call_args.args[:2] == (error_type, failure)
+
+
 def _search(repository, **overrides):
     arguments = {
         "experiment_ids": ["42"],
