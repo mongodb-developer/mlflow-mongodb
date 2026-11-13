@@ -330,28 +330,80 @@ def test_batch_complete_reads_omit_empty_and_partially_exported_traces(
     assert store.get_trace(empty.trace_id, allow_partial=True).data.spans == []
 
 
-def test_trace_tags_and_links_are_idempotent_and_preserve_literal_values(store, trace):
+def test_trace_tags_and_links_are_idempotent_and_preserve_literal_values(store, trace, run):
     store.set_trace_tag(trace.trace_id, "team.name", "$risk")
     store.set_trace_tag(trace.trace_id, "team.name", "$risk")
     store.set_trace_tag(trace.trace_id, "remove", "value")
     store.delete_trace_tag(trace.trace_id, "remove")
-    request = LinkTracesToRun(trace_ids=[trace.trace_id, "tr-missing"], run_id="run")
+    request = LinkTracesToRun(trace_ids=[trace.trace_id, trace.trace_id], run_id=run.info.run_id)
     store.link_traces_to_run(request.trace_ids, request.run_id)
     store.link_traces_to_run(request.trace_ids, request.run_id)
     refs = [{"name": "greeting", "version": "1"}]
-    store._trace_repository.link_prompts(trace_id=trace.trace_id, prompt_versions=refs)
-    store._trace_repository.link_prompts(trace_id=trace.trace_id, prompt_versions=refs)
+    store.link_prompts_to_trace(
+        trace.trace_id, [PromptVersion(name="greeting", version=1, template="Hello")]
+    )
+    store.link_prompts_to_trace(
+        trace.trace_id, [PromptVersion(name="greeting", version=1, template="Hello")]
+    )
 
     loaded = store.get_trace_info(trace.trace_id)
     document = store._trace_repository._collection.find_one({"_id": trace.trace_id})
 
     assert loaded.tags["team.name"] == "$risk"
     assert "remove" not in loaded.tags
-    assert document["run_ids"] == ["run"]
+    assert document["run_ids"] == [run.info.run_id]
     assert document["linked_prompts"] == refs
     assert len([tag for tag in document["tags"] if tag["k"] == "team.name"]) == 1
-    assert list(request.trace_ids) == [trace.trace_id, "tr-missing"]
-    assert store._trace_repository._collection.count_documents({"_id": "tr-missing"}) == 0
+    assert list(request.trace_ids) == [trace.trace_id, trace.trace_id]
+
+
+@pytest.mark.parametrize(
+    "trace_ids,missing_ids",
+    [
+        (("tr-missing", "{trace_id}"), ["tr-missing"]),
+        (("{trace_id}", "tr-missing"), ["tr-missing"]),
+        (
+            ("tr-missing-b", "{trace_id}", "tr-missing-a", "tr-missing-b"),
+            ["tr-missing-a", "tr-missing-b"],
+        ),
+    ],
+)
+def test_missing_trace_rejects_run_link_batch_without_writing(
+    store, trace, run, trace_ids, missing_ids
+):
+    requested_ids = [trace_id.format(trace_id=trace.trace_id) for trace_id in trace_ids]
+
+    with pytest.raises(MlflowException) as caught:
+        store.link_traces_to_run(requested_ids, run.info.run_id)
+
+    assert caught.value.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST)
+    assert caught.value.message == f"Traces with IDs {missing_ids} not found."
+    document = store._trace_repository._collection.find_one({"_id": trace.trace_id})
+    assert document["run_ids"] == []
+    assert store._trace_repository._collection.count_documents({"_id": {"$in": missing_ids}}) == 0
+
+
+def test_missing_run_rejects_trace_links_without_writing(store, trace):
+    run_id = "f" * 32
+    collection = store._trace_repository._collection
+    before = collection.find_one({"_id": trace.trace_id})
+
+    with pytest.raises(MlflowException) as caught:
+        store.link_traces_to_run([trace.trace_id], run_id)
+
+    assert caught.value.error_code == ErrorCode.Name(RESOURCE_DOES_NOT_EXIST)
+    assert caught.value.message == f"Run with id={run_id} not found"
+    assert collection.find_one({"_id": trace.trace_id}) == before
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_empty_prompt_link_batch_preserves_trace_documents(store, trace, missing):
+    trace_id = "tr-missing" if missing else trace.trace_id
+    before = store._trace_repository._collection.find_one({"_id": trace_id})
+
+    store.link_prompts_to_trace(trace_id, [])
+
+    assert store._trace_repository._collection.find_one({"_id": trace_id}) == before
 
 
 def test_setting_tag_on_missing_trace_returns_not_found_without_creating_trace(store):
