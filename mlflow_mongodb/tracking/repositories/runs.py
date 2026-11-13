@@ -49,7 +49,7 @@ class RunOrder:
 class RunRepository:
     """Store run documents with small run fields embedded in the document."""
 
-    EXPERIMENT_INDEX = "runs_experiment_id"
+    TAG_INDEX = "runs_experiment_lifecycle_tags_k_v"
     _METRIC_IDENTITY_FIELDS = (
         "run_id",
         "k",
@@ -63,7 +63,22 @@ class RunRepository:
         with repository_operation("Unable to initialize run repository."):
             self._collection = database[self._settings.runs_collection_name]
             self._collection.create_index(
-                [("experiment_id", ASCENDING)], name=self.EXPERIMENT_INDEX
+                [
+                    ("experiment_id", ASCENDING),
+                    ("lifecycle_stage", ASCENDING),
+                    ("tags.k", ASCENDING),
+                    ("tags.v", ASCENDING),
+                ],
+                name=self.TAG_INDEX,
+            )
+            self._collection.create_index(
+                [
+                    ("experiment_id", ASCENDING),
+                    ("lifecycle_stage", ASCENDING),
+                    ("start_time", DESCENDING),
+                    ("_id", ASCENDING),
+                ],
+                name="runs_experiment_lifecycle_start_time_id",
             )
             self._metrics_collection = database[self._settings.run_metrics_collection_name]
             self._metrics_collection.create_index(
@@ -105,43 +120,79 @@ class RunRepository:
             {"experiment_id": {"$in": list(experiment_ids)}},
             {"lifecycle_stage": {"$in": list(lifecycle_stages)}},
         ]
-        clauses.extend(self._search_condition(clause) for clause in filters)
+        clauses.extend(self._search_conditions(filters))
         pipeline = [{"$match": {"$and": clauses}}]
         values = {}
         ranks = {}
         sort = {}
         for index, order in enumerate(order_by):
-            field = f"_search_value_{index}"
-            rank = f"_search_rank_{index}"
-            values[field] = self._search_order_value(order)
-            reference = f"${field}"
-            missing = {"$eq": [reference, None]}
-            if order.field_type == "metric":
-                ranks[rank] = {
-                    "$switch": {
-                        "branches": [
-                            {"case": missing, "then": 2},
-                            {"case": {"$eq": [reference, {"$literal": float("nan")}]}, "then": 1},
-                        ],
-                        "default": 0,
-                    }
-                }
-            else:
-                ranks[rank] = {"$cond": [missing, 1, 0]}
-            sort[rank] = ASCENDING
-            sort[field] = ASCENDING if order.ascending else DESCENDING
-        pipeline.extend([{"$set": values}, {"$set": ranks}, {"$sort": sort}])
+            order_values, order_ranks, order_sort = self._search_order_fields(index, order)
+            values.update(order_values)
+            ranks.update(order_ranks)
+            sort.update(order_sort)
+        if values:
+            pipeline.extend([{"$set": values}, {"$set": ranks}])
+        pipeline.append({"$sort": sort})
         if offset:
             pipeline.append({"$skip": offset})
         if limit is not None:
             pipeline.append({"$limit": limit})
-        pipeline.append({"$unset": [*values, *ranks]})
+        if values:
+            pipeline.append({"$unset": [*values, *ranks]})
         with (
             repository_operation("Unable to search runs."),
             self._collection.aggregate(pipeline) as cursor,
         ):
             documents = list(cursor)
         return [RunRecord.from_document(document) for document in documents]
+
+    def _search_order_fields(self, index: int, order: RunOrder) -> tuple[dict, dict, dict]:
+        direction = ASCENDING if order.ascending else DESCENDING
+        if order.field_type == "attribute" and order.key in ("start_time", "run_id"):
+            return {}, {}, {self._attribute_field(order.key): direction}
+
+        field = f"_search_value_{index}"
+        rank = f"_search_rank_{index}"
+        reference = f"${field}"
+        missing = {"$eq": [reference, None]}
+        if order.field_type == "metric":
+            rank_value = {
+                "$switch": {
+                    "branches": [
+                        {"case": missing, "then": 2},
+                        {"case": {"$eq": [reference, {"$literal": float("nan")}]}, "then": 1},
+                    ],
+                    "default": 0,
+                }
+            }
+        else:
+            rank_value = {"$cond": [missing, 1, 0]}
+        return (
+            {field: self._search_order_value(order)},
+            {rank: rank_value},
+            {rank: ASCENDING, field: direction},
+        )
+
+    @classmethod
+    def _search_conditions(cls, filters: Sequence[RunFilter]) -> list[dict]:
+        conditions = []
+        embedded_filters: dict[tuple[str, str], list[RunFilter]] = {}
+        for clause in filters:
+            field_type, key = clause.field_type, clause.key
+            if field_type == "attribute" and key == "run_name":
+                field_type, key = "tag", MLFLOW_RUN_NAME
+            if field_type in ("metric", "parameter", "tag") and clause.comparator not in (
+                "IS NULL",
+                "IS NOT NULL",
+            ):
+                embedded_filters.setdefault((field_type, key), []).append(clause)
+            else:
+                conditions.append(cls._search_condition(clause))
+        conditions.extend(
+            cls._embedded_condition(field_type, key, clauses)
+            for (field_type, key), clauses in embedded_filters.items()
+        )
+        return conditions
 
     @staticmethod
     def _search_condition(clause: RunFilter) -> dict:
@@ -152,13 +203,18 @@ class RunRepository:
             clause.comparator,
             clause.value,
         )
+        if field_type == "attribute" and key == "run_name":
+            field_type, key = "tag", MLFLOW_RUN_NAME
         if field_type == "attribute":
-            if key == "run_name":
-                return RunRepository._embedded_condition("tag", MLFLOW_RUN_NAME, comparator, value)
             return RunRepository._attribute_condition(key, comparator, value)
         if field_type == "dataset":
             return RunRepository._dataset_condition(key, comparator, value)
-        return RunRepository._embedded_condition(field_type, key, comparator, value)
+        field = RunRepository._embedded_field(field_type)
+        if comparator == "IS NULL":
+            return {field: {"$not": {"$elemMatch": {"k": key}}}}
+        if comparator == "IS NOT NULL":
+            return {field: {"$elemMatch": {"k": key}}}
+        return RunRepository._embedded_condition(field_type, key, [clause])
 
     @staticmethod
     def _attribute_condition(key, comparator, value) -> dict:
@@ -191,20 +247,17 @@ class RunRepository:
         return {"inputs.datasets": {"$elemMatch": match}}
 
     @staticmethod
-    def _embedded_condition(field_type, key, comparator, value) -> dict:
-        """Filter embedded metrics, parameters, or tags by key and value or key existence."""
+    def _embedded_condition(field_type: str, key: str, clauses: Sequence[RunFilter]) -> dict:
+        """Filter embedded metrics, parameters, or tags by key and grouped value comparisons."""
         field = RunRepository._embedded_field(field_type)
-        if comparator == "IS NULL":
-            return {field: {"$not": {"$elemMatch": {"k": key}}}}
-        if comparator == "IS NOT NULL":
-            return {field: {"$elemMatch": {"k": key}}}
         match = {
+            "k": key,
             "$and": [
-                {"k": key, "v": build_value_condition(comparator, value)},
-                {"v": {"$ne": None}},
+                {"v": build_value_condition(clause.comparator, clause.value)} for clause in clauses
             ]
+            + [{"v": {"$ne": None}}],
         }
-        if field_type == "metric" and comparator != "!=":
+        if field_type == "metric" and any(clause.comparator != "!=" for clause in clauses):
             # BSON orders NaN numerically; MLflow numeric comparisons must exclude it.
             match["$and"].append({"v": {"$ne": float("nan")}})
         return {field: {"$elemMatch": match}}
