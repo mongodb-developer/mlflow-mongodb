@@ -97,8 +97,7 @@ instead.
 ## Versioning
 
 This project follows [Semantic Versioning](https://semver.org/) (`MAJOR.MINOR.PATCH`), same as
-[MLflow](https://mlflow.org/) itself. It's currently on major version `0`, meaning the API isn't
-yet stable and may change between releases. `main` always carries a `.devN` version (e.g.
+[MLflow](https://mlflow.org/) itself. `main` always carries a `.devN` version (e.g.
 `0.1.0.dev0`) to signal it's unreleased and ahead of the latest published version.
 
 ## Verifying releases
