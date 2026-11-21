@@ -915,6 +915,35 @@ class MongoDBTrackingStore(AbstractStore):
             return math.copysign(sys.float_info.max, value)
         return value
 
+    def _validate_metric_model_references(
+        self, run_id: str, metrics: list[Metric], params: list[Param]
+    ) -> None:
+        model_ids = {metric.model_id for metric in metrics if metric.model_id is not None}
+        if not model_ids:
+            return
+
+        # Preserve run and parameter validation precedence before checking references.
+        # The repository repeats these checks atomically when applying the batch.
+        run = self._run_repository.find_by_id(run_id)
+        if run is None:
+            raise RepositoryNotFoundError(run_id)
+        if run.lifecycle_stage != LifecycleStage.ACTIVE:
+            raise RepositoryNotActiveError(run_id, run.lifecycle_stage)
+        existing_params = {param.key: param.value for param in run.params}
+        for param in params:
+            if param.key in existing_params and existing_params[param.key] != param.value:
+                raise RepositoryParamConflictError(
+                    param.key, existing_params[param.key], param.value, run_id
+                )
+
+        existing_ids = self._logged_model_repository.find_existing_ids(model_ids)
+        if model_ids != existing_ids:
+            missing_ids = sorted(model_ids - existing_ids)
+            raise MlflowException(
+                f"Unable to log metrics: logged models with IDs {missing_ids} not found.",
+                INTERNAL_ERROR,
+            )
+
     @handle_persistence_error("Unable to log run batch.", logger=logger)
     def log_batch(
         self, run_id: str, metrics: list[Metric], params: list[Param], tags: list[RunTag]
@@ -925,6 +954,7 @@ class MongoDBTrackingStore(AbstractStore):
         _validate_param_keys_unique(params)
 
         try:
+            self._validate_metric_model_references(run_id, metrics, params)
             self._run_repository.log_batch(
                 run_id=run_id,
                 metrics=[
@@ -2627,6 +2657,7 @@ class MongoDBTrackingStore(AbstractStore):
         if not prompt_versions:
             return
 
+        self._get_trace_record(trace_id)
         refs = [
             {"name": prompt_version.name, "version": str(prompt_version.version)}
             for prompt_version in prompt_versions
@@ -2652,7 +2683,17 @@ class MongoDBTrackingStore(AbstractStore):
                 f"Provided {len(trace_ids)} traces."
             )
 
-        self._trace_repository.link_traces_to_run(trace_ids=list(trace_ids), run_id=run_id)
+        self.get_run(run_id)
+        requested_ids = set(trace_ids)
+        trace_ids = list(requested_ids)
+        records = self._trace_repository.batch_get_trace_infos(trace_ids)
+        existing_ids = {record.trace_id for record in records}
+        if requested_ids != existing_ids:
+            missing_ids = sorted(requested_ids - existing_ids)
+            raise MlflowException(
+                f"Traces with IDs {missing_ids} not found.", RESOURCE_DOES_NOT_EXIST
+            )
+        self._trace_repository.link_traces_to_run(trace_ids=trace_ids, run_id=run_id)
 
     def unlink_traces_from_run(self, trace_ids: list[str], run_id: str) -> None:
         raise NotImplementedError

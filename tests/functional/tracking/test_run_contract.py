@@ -123,14 +123,14 @@ def test_latest_metric_uses_step_then_timestamp_then_value_and_keeps_history(sto
 
 def test_metric_history_pagination_is_scoped_to_run_points(store, run):
     run_id = run.info.run_id
-    model_id = "m-" + "a" * 32
+    model = store.create_logged_model(run.info.experiment_id, name="paginated-metrics")
     events = [
         Metric(
             "loss",
             index / 10,
             1000 + index,
             index,
-            model_id=model_id,
+            model_id=model.model_id,
             dataset_name="training",
             dataset_digest="abc",
         )

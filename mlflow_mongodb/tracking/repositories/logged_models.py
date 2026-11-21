@@ -1,7 +1,7 @@
 """Persistence operations for logged models."""
 
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -147,6 +147,16 @@ class LoggedModelRepository:
         with repository_operation("Unable to get logged model."):
             document = self._collection.find_one({"_id": model_id})
         return LoggedModelRecord.from_document(document) if document is not None else None
+
+    def find_existing_ids(self, model_ids: Collection[str]) -> set[str]:
+        """Return existing model IDs, including models marked deleted."""
+        if not model_ids:
+            return set()
+        with (
+            repository_operation("Unable to validate logged model references."),
+            self._collection.find({"_id": {"$in": list(model_ids)}}, {"_id": 1}) as cursor,
+        ):
+            return {document["_id"] for document in cursor}
 
     def get_metric_history(self, model_id: str) -> tuple[RunMetricRecord, ...]:
         """Read the complete metric history associated with a model."""

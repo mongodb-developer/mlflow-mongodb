@@ -7,7 +7,7 @@ from mlflow.utils.search_utils import SearchTraceUtils
 
 
 @pytest.fixture
-def searchable_traces(store, trace_info_factory):
+def searchable_traces(store, trace_info_factory, run):
     traces = {
         "a": store.start_trace(
             trace_info_factory(
@@ -22,7 +22,7 @@ def searchable_traces(store, trace_info_factory):
                 request_time=2000,
                 state=TraceState.ERROR,
                 tags={TraceTagKey.TRACE_NAME: "beta", "team.name": "other"},
-                trace_metadata={TraceMetadataKey.SOURCE_RUN: "run"},
+                trace_metadata={TraceMetadataKey.SOURCE_RUN: run.info.run_id},
                 client_request_id="other",
             )
         ),
@@ -34,7 +34,7 @@ def searchable_traces(store, trace_info_factory):
             )
         ),
     }
-    store.link_traces_to_run([traces["a"].trace_id], "run")
+    store.link_traces_to_run([traces["a"].trace_id], run.info.run_id)
     store._trace_repository.link_prompts(
         trace_id=traces["a"].trace_id, prompt_versions=[{"name": "greeting", "version": "2"}]
     )
@@ -97,7 +97,7 @@ def searchable_traces(store, trace_info_factory):
                 reason="Installed MLflow has no RLIKE trace-name filters",
             ),
         ),
-        ("run_id = 'run'", ["a", "b"]),
+        ("run_id = '{run_id}'", ["a", "b"]),
         pytest.param(
             "prompt = 'greeting/2'",
             ["a"],
@@ -109,12 +109,12 @@ def searchable_traces(store, trace_info_factory):
         ("status = 'OK' AND tags.`team.name` = '$risk'", ["a"]),
     ],
 )
-def test_filters_return_matching_traces(store, searchable_traces, expression, expected):
+def test_filters_return_matching_traces(store, searchable_traces, run, expression, expected):
     experiment_id = searchable_traces["a"].experiment_id
 
     records, _ = store.search_traces(
         experiment_ids=[experiment_id],
-        filter_string=expression,
+        filter_string=expression.format(run_id=run.info.run_id),
         order_by=["timestamp_ms ASC"],
     )
 
